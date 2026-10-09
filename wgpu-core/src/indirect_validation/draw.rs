@@ -1043,10 +1043,48 @@ impl DrawBatcher {
         let limits = device.adapter.limits();
         let src_buffer_tracker_index = src_buffer.tracker_index();
 
+        // A source buffer that fits in one binding always splits as `(0, offset)`.
+        let single_binding = buffer_size <= u64::from(limits.max_storage_buffer_binding_size);
+
         let mut first = 0;
         while first < count {
             let (dst_resource_index, dst_offset, run) = indirect_draw_validation_resources
                 .get_dst_run(dst_stride, count - first, &mut self.current_dst_entry)?;
+            if single_binding {
+                let batch = self
+                    .batches
+                    .entry((src_buffer_tracker_index, 0, dst_resource_index))
+                    .or_insert_with(|| DrawIndirectValidationBatch {
+                        src_buffer: src_buffer.clone(),
+                        src_dynamic_offset: 0,
+                        dst_resource_index,
+                        entries: Vec::new(),
+
+                        // these will be initialized once we accumulated all entries for the batch
+                        staging_buffer_index: 0,
+                        staging_buffer_offset: 0,
+                        metadata_resource_index: 0,
+                        metadata_buffer_offset: 0,
+                    });
+                let src_first = offset + src_stride * u64::from(first);
+                batch.entries.extend((0..run).map(|index| {
+                    MetadataEntry::new(
+                        indexed,
+                        src_first + src_stride * u64::from(index),
+                        dst_offset + dst_stride * u64::from(index),
+                        vertex_or_index_limit,
+                        instance_limit,
+                    )
+                }));
+                draw(
+                    indirect_draw_validation_resources,
+                    dst_resource_index,
+                    dst_offset,
+                    run,
+                );
+                first += run;
+                continue;
+            }
             let src_offsets = |index: u32| {
                 calculate_src_offsets(
                     buffer_size,
