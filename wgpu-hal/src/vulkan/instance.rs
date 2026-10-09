@@ -1110,6 +1110,22 @@ impl crate::Surface for super::Surface {
             timeout_ns,
         )?;
 
+        // Only FIFO swapchains on Windows need the acquire fence: there the
+        // Vulkan driver presents through DXGI, and pacing degrades without it
+        // (https://github.com/gfx-rs/wgpu/issues/8310). Elsewhere, and for
+        // Immediate or Mailbox presentation, the wait only adds acquire latency
+        // (https://github.com/gfx-rs/wgpu/issues/9559).
+        let wait_for_acquire_fence = cfg!(windows)
+            && matches!(
+                swapchain.config.present_mode,
+                wgt::PresentMode::Fifo | wgt::PresentMode::FifoRelaxed
+            );
+        let acquire_fence = if wait_for_acquire_fence {
+            swapchain.fence
+        } else {
+            vk::Fence::null()
+        };
+
         // will block if no image is available
         let (index, suboptimal) = match unsafe {
             profiling::scope!("vkAcquireNextImageKHR");
@@ -1117,7 +1133,7 @@ impl crate::Surface for super::Surface {
                 swapchain.raw,
                 timeout_ns,
                 acquire_semaphore_guard.acquire,
-                swapchain.fence,
+                acquire_fence,
             )
         } {
             // We treat `VK_SUBOPTIMAL_KHR` as `VK_SUCCESS` on Android.
@@ -1140,28 +1156,26 @@ impl crate::Surface for super::Surface {
             }
         };
 
-        // Wait for the image was acquired to be fully ready to be rendered too.
+        // Wait for the acquired image to be fully ready to be rendered to.
         //
         // This wait is very important on Windows to avoid bad frame pacing on
         // Windows where the Vulkan driver is using a DXGI swapchain. See
         // https://github.com/gfx-rs/wgpu/issues/8310 and
         // https://github.com/gfx-rs/wgpu/issues/8354 for more details.
-        //
-        // On other platforms, this wait may serve to slightly decrease frame
-        // latency, depending on how the platform implements waiting within
-        // acquire.
-        unsafe {
-            swapchain
-                .device
-                .raw
-                .wait_for_fences(&[swapchain.fence], false, timeout_ns)
-                .map_err(super::map_host_device_oom_and_lost_err)?;
+        if wait_for_acquire_fence {
+            unsafe {
+                swapchain
+                    .device
+                    .raw
+                    .wait_for_fences(&[swapchain.fence], false, timeout_ns)
+                    .map_err(super::map_host_device_oom_and_lost_err)?;
 
-            swapchain
-                .device
-                .raw
-                .reset_fences(&[swapchain.fence])
-                .map_err(super::map_host_device_oom_and_lost_err)?;
+                swapchain
+                    .device
+                    .raw
+                    .reset_fences(&[swapchain.fence])
+                    .map_err(super::map_host_device_oom_and_lost_err)?;
+            }
         }
 
         drop(acquire_semaphore_guard);
