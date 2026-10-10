@@ -843,7 +843,7 @@ impl DrawResources {
                     let indirect_draw_validation =
                         &self.device.indirect_validation.as_ref().unwrap().draw;
                     let entry = indirect_draw_validation
-                        .acquire_dst_entry(self.device.raw())
+                        .acquire_dst_entry(self.device.raw(), self.device.instance_flags)
                         .map_err(DeviceError::from_hal)?;
                     self.dst_entries.push(entry);
                 }
