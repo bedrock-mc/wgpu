@@ -841,6 +841,39 @@ impl DrawResources {
         Ok((entry_data.index, entry_data.offset))
     }
 
+    /// Reserves consecutive destination slots in one buffer, returning the buffer, offset and count.
+    fn get_dst_run(
+        &mut self,
+        size: u64,
+        count: u32,
+        current_entry: &mut Option<CurrentEntry>,
+    ) -> Result<(usize, u64, u32), DeviceError> {
+        let room = current_entry
+            .as_ref()
+            .map_or(0, |entry| (BUFFER_SIZE.get() - entry.offset) / size);
+        let (index, offset, room) = match current_entry.as_ref() {
+            Some(entry) if room > 0 => (entry.index, entry.offset, room),
+            _ => {
+                let index = current_entry.as_ref().map_or(0, |entry| entry.index + 1);
+                if self.dst_entries.len() <= index {
+                    let indirect_draw_validation =
+                        &self.device.indirect_validation.as_ref().unwrap().draw;
+                    let entry = indirect_draw_validation
+                        .acquire_dst_entry(self.device.raw(), self.device.instance_flags)
+                        .map_err(DeviceError::from_hal)?;
+                    self.dst_entries.push(entry);
+                }
+                (index, 0, BUFFER_SIZE.get() / size)
+            }
+        };
+        let run = room.min(u64::from(count)) as u32;
+        *current_entry = Some(CurrentEntry {
+            index,
+            offset: offset + size * u64::from(run),
+        });
+        Ok((index, offset, run))
+    }
+
     fn get_metadata_subrange(
         &mut self,
         size: u64,
@@ -1042,6 +1075,126 @@ impl DrawBatcher {
         }
 
         Ok((dst_resource_index, dst_offset))
+    }
+
+    /// Validates consecutive draws with the same metadata and layout as repeated `add` calls.
+    /// Calls `draw` for each ordered run sharing a destination buffer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_range(
+        &mut self,
+        indirect_draw_validation_resources: &mut DrawResources,
+        device: &Device,
+        src_buffer: &Arc<crate::resource::Buffer>,
+        offset: u64,
+        count: u32,
+        family: crate::command::DrawCommandFamily,
+        vertex_or_index_limit: u64,
+        instance_limit: u64,
+        mut draw: impl FnMut(&DrawResources, usize, u64, u32),
+    ) -> Result<(), DeviceError> {
+        let src_stride = crate::command::get_src_stride_of_indirect_args(family);
+        let dst_stride = crate::command::get_dst_stride_of_indirect_args(device.backend(), family);
+        let indexed = family == crate::command::DrawCommandFamily::DrawIndexed;
+        let buffer_size = src_buffer.size;
+        let limits = device.adapter.limits();
+        let src_buffer_tracker_index = src_buffer.tracker_index();
+
+        // A source buffer that fits in one binding always splits as `(0, offset)`.
+        let single_binding = buffer_size <= u64::from(limits.max_storage_buffer_binding_size);
+
+        let mut first = 0;
+        while first < count {
+            let (dst_resource_index, dst_offset, run) = indirect_draw_validation_resources
+                .get_dst_run(dst_stride, count - first, &mut self.current_dst_entry)?;
+            if single_binding {
+                let batch = self
+                    .batches
+                    .entry((src_buffer_tracker_index, 0, dst_resource_index))
+                    .or_insert_with(|| DrawIndirectValidationBatch {
+                        src_buffer: src_buffer.clone(),
+                        src_dynamic_offset: 0,
+                        dst_resource_index,
+                        entries: Vec::new(),
+
+                        // these will be initialized once we accumulated all entries for the batch
+                        staging_buffer_index: 0,
+                        staging_buffer_offset: 0,
+                        metadata_resource_index: 0,
+                        metadata_buffer_offset: 0,
+                    });
+                let src_first = offset + src_stride * u64::from(first);
+                batch.entries.extend((0..run).map(|index| {
+                    MetadataEntry::new(
+                        indexed,
+                        src_first + src_stride * u64::from(index),
+                        dst_offset + dst_stride * u64::from(index),
+                        vertex_or_index_limit,
+                        instance_limit,
+                    )
+                }));
+                draw(
+                    indirect_draw_validation_resources,
+                    dst_resource_index,
+                    dst_offset,
+                    run,
+                );
+                first += run;
+                continue;
+            }
+            let src_offsets = |index: u32| {
+                calculate_src_offsets(
+                    buffer_size,
+                    &limits,
+                    offset + src_stride * u64::from(first + index),
+                    src_stride,
+                )
+            };
+            let mut index = 0;
+            while index < run {
+                let (src_dynamic_offset, _) = src_offsets(index);
+                let batch = self
+                    .batches
+                    .entry((
+                        src_buffer_tracker_index,
+                        src_dynamic_offset,
+                        dst_resource_index,
+                    ))
+                    .or_insert_with(|| DrawIndirectValidationBatch {
+                        src_buffer: src_buffer.clone(),
+                        src_dynamic_offset,
+                        dst_resource_index,
+                        entries: Vec::new(),
+
+                        // these will be initialized once we accumulated all entries for the batch
+                        staging_buffer_index: 0,
+                        staging_buffer_offset: 0,
+                        metadata_resource_index: 0,
+                        metadata_buffer_offset: 0,
+                    });
+                while index < run {
+                    let (draw_dynamic_offset, src_offset) = src_offsets(index);
+                    if draw_dynamic_offset != src_dynamic_offset {
+                        break;
+                    }
+                    batch.entries.push(MetadataEntry::new(
+                        indexed,
+                        src_offset,
+                        dst_offset + dst_stride * u64::from(index),
+                        vertex_or_index_limit,
+                        instance_limit,
+                    ));
+                    index += 1;
+                }
+            }
+            draw(
+                indirect_draw_validation_resources,
+                dst_resource_index,
+                dst_offset,
+                run,
+            );
+            first += run;
+        }
+        Ok(())
     }
 }
 
