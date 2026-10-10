@@ -168,13 +168,18 @@ const DOWNLEVEL_ERROR_MESSAGE: &str = concat!(
     "to get a listing of the features the current platform supports."
 );
 
+// Filter before constructing label strings when a bridging logger enables unused log levels.
 #[cfg(feature = "api_log_info")]
 macro_rules! api_log {
     ($($arg:tt)+) => (log::info!($($arg)+))
 }
 #[cfg(not(feature = "api_log_info"))]
 macro_rules! api_log {
-    ($($arg:tt)+) => (log::trace!($($arg)+))
+    ($($arg:tt)+) => {
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!($($arg)+)
+        }
+    };
 }
 
 #[cfg(feature = "api_log_info")]
@@ -183,7 +188,11 @@ macro_rules! api_log_debug {
 }
 #[cfg(not(feature = "api_log_info"))]
 macro_rules! api_log_debug {
-    ($($arg:tt)+) => (log::debug!($($arg)+))
+    ($($arg:tt)+) => {
+        if log::log_enabled!(log::Level::Debug) {
+            log::debug!($($arg)+)
+        }
+    };
 }
 
 pub(crate) use api_log;
@@ -195,7 +204,11 @@ macro_rules! resource_log {
 }
 #[cfg(not(feature = "resource_log_info"))]
 macro_rules! resource_log {
-    ($($arg:tt)+) => (log::trace!($($arg)+))
+    ($($arg:tt)+) => {
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!($($arg)+)
+        }
+    };
 }
 pub(crate) use resource_log;
 
