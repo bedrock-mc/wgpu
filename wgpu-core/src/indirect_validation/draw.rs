@@ -1092,7 +1092,7 @@ impl DrawBatcher {
         instance_limit: u64,
         mut draw: impl FnMut(&DrawResources, usize, u64, u32),
     ) -> Result<(), DeviceError> {
-        let src_stride = crate::command::get_src_stride_of_indirect_args(family);
+        let src_stride = get_src_stride_of_indirect_args(family);
         let dst_stride = crate::command::get_dst_stride_of_indirect_args(device.backend(), family);
         let indexed = family == crate::command::DrawCommandFamily::DrawIndexed;
         let buffer_size = src_buffer.size;
@@ -1100,7 +1100,7 @@ impl DrawBatcher {
         let src_buffer_tracker_index = src_buffer.tracker_index();
 
         // A source buffer that fits in one binding always splits as `(0, offset)`.
-        let single_binding = buffer_size <= u64::from(limits.max_storage_buffer_binding_size);
+        let single_binding = buffer_size <= limits.max_storage_buffer_binding_size;
 
         let mut first = 0;
         while first < count {
