@@ -1810,6 +1810,29 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         None
                     };
 
+                    // `Modf` and `Frexp` evaluate to a predeclared result struct
+                    // (rather than the SPIR-V result type), which must be registered
+                    // in the module's special types.
+                    if let Mf::Modf | Mf::Frexp = fun {
+                        let result_ty = self.lookup_type.lookup(result_type_id)?.handle;
+                        let (size, scalar) = match ctx.module.types[result_ty].inner {
+                            crate::TypeInner::Struct { ref members, .. } => {
+                                match ctx.module.types[members[0].ty].inner {
+                                    crate::TypeInner::Scalar(scalar) => (None, scalar),
+                                    crate::TypeInner::Vector { size, scalar } => {
+                                        (Some(size), scalar)
+                                    }
+                                    _ => return Err(Error::UnsupportedExtInst(inst_id)),
+                                }
+                            }
+                            _ => return Err(Error::UnsupportedExtInst(inst_id)),
+                        };
+                        ctx.module.generate_predeclared_type(match fun {
+                            Mf::Modf => crate::PredeclaredType::ModfResult { size, scalar },
+                            _ => crate::PredeclaredType::FrexpResult { size, scalar },
+                        });
+                    }
+
                     let expr = crate::Expression::Math {
                         fun,
                         arg,
