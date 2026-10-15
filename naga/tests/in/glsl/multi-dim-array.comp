@@ -1,0 +1,30 @@
+#version 450
+// `T x[A][B]` declares an array of `A` arrays of `B` elements, so `x[i]` is a
+// `T[B]` that can be passed to a function taking `T[B]`.
+
+layout(local_size_x = 1) in;
+
+shared vec3 shared_values[4][9];
+
+layout(set = 0, binding = 0) buffer Output {
+    vec3 result;
+    float sizes[2];
+};
+
+vec3 sum(vec3[9] values) {
+    vec3 total = vec3(0.0);
+    for (int i = 0; i < 9; i++) {
+        total += values[i];
+    }
+    return total;
+}
+
+void main() {
+    vec3 local_values[2][9];
+    float[3] nested[2];
+    local_values[1][8] = vec3(1.0);
+    nested[1][2] = 2.0;
+    result = sum(shared_values[3]) + sum(local_values[1]);
+    sizes[0] = float(shared_values.length() * 10 + shared_values[0].length());
+    sizes[1] = float(nested.length() * 10 + nested[0].length()) + nested[1][2];
+}
