@@ -348,6 +348,7 @@ const RESERVED: &[&str] = &[
     super::writer::FREXP_FUNCTION,
     super::writer::MODF_FUNCTION,
     super::writer::ABS_FUNCTION,
+    super::writer::INVERSE_FUNCTION,
     super::writer::DIV_FUNCTION,
     // DOT_FUNCTION_PREFIX variants are added dynamically below
     super::writer::MOD_FUNCTION,

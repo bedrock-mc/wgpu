@@ -39,6 +39,7 @@ pub(crate) const SAMPLER_HEAP_VAR: &str = "nagaSamplerHeap";
 pub(crate) const COMPARISON_SAMPLER_HEAP_VAR: &str = "nagaComparisonSamplerHeap";
 pub(crate) const SAMPLE_EXTERNAL_TEXTURE_FUNCTION: &str = "nagaSampleExternalTexture";
 pub(crate) const ABS_FUNCTION: &str = "naga_abs";
+pub(crate) const INVERSE_FUNCTION: &str = "naga_inverse";
 pub(crate) const DIV_FUNCTION: &str = "naga_div";
 pub(crate) const MOD_FUNCTION: &str = "naga_mod";
 pub(crate) const NEG_FUNCTION: &str = "naga_neg";
@@ -3171,7 +3172,7 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
             Mf::SmoothStep => Function::Regular("smoothstep"),
             Mf::Sqrt => Function::Regular("sqrt"),
             Mf::InverseSqrt => Function::Regular("rsqrt"),
-            //Mf::Inverse =>,
+            Mf::Inverse => Function::Regular(INVERSE_FUNCTION),
             Mf::Transpose => Function::Regular("transpose"),
             Mf::Determinant => Function::Regular("determinant"),
             Mf::QuantizeToF16 => Function::QuantizeToF16,

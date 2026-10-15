@@ -34,7 +34,8 @@ use super::{
     writer::{
         ABS_FUNCTION, DIV_FUNCTION, EXTRACT_BITS_FUNCTION, F2I32_FUNCTION, F2I64_FUNCTION,
         F2U32_FUNCTION, F2U64_FUNCTION, IMAGE_LOAD_EXTERNAL_FUNCTION,
-        IMAGE_SAMPLE_BASE_CLAMP_TO_EDGE_FUNCTION, INSERT_BITS_FUNCTION, MOD_FUNCTION, NEG_FUNCTION,
+        IMAGE_SAMPLE_BASE_CLAMP_TO_EDGE_FUNCTION, INSERT_BITS_FUNCTION, INVERSE_FUNCTION,
+        MOD_FUNCTION, NEG_FUNCTION,
     },
     BackendResult, WrappedType,
 };
@@ -1535,6 +1536,33 @@ impl<W: Write> super::Writer<'_, W> {
                         )?;
                         writeln!(self.out, "}}")?;
                         writeln!(self.out)?;
+                    }
+                    // HLSL has no matrix inverse intrinsic.
+                    crate::MathFunction::Inverse => {
+                        let crate::TypeInner::Matrix {
+                            columns, scalar, ..
+                        } = *arg_ty
+                        else {
+                            continue;
+                        };
+                        let wrapped = WrappedMath {
+                            fun,
+                            scalar,
+                            components: Some(columns as u32),
+                        };
+                        if !self.wrapped.insert(WrappedType::Math(wrapped)) {
+                            continue;
+                        }
+
+                        let scalar_ty = scalar.to_hlsl_str()?;
+                        let n = columns as u8;
+                        crate::back::inverse::write_inverse_function(
+                            &mut self.out,
+                            INVERSE_FUNCTION,
+                            columns,
+                            &format!("{scalar_ty}{n}x{n}"),
+                            scalar_ty,
+                        )?;
                     }
                     _ => {}
                 }

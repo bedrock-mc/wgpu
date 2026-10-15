@@ -42,6 +42,7 @@ pub(crate) const ATOMIC_COMP_EXCH_FUNCTION: &str = "naga_atomic_compare_exchange
 pub(crate) const MODF_FUNCTION: &str = "naga_modf";
 pub(crate) const FREXP_FUNCTION: &str = "naga_frexp";
 pub(crate) const ABS_FUNCTION: &str = "naga_abs";
+pub(crate) const INVERSE_FUNCTION: &str = "naga_inverse";
 pub(crate) const DIV_FUNCTION: &str = "naga_div";
 pub(crate) const DOT_FUNCTION_PREFIX: &str = "naga_dot";
 pub(crate) const MOD_FUNCTION: &str = "naga_mod";
@@ -2705,7 +2706,7 @@ impl<W: Write> Writer<W> {
                     Mf::SmoothStep => "smoothstep",
                     Mf::Sqrt => "sqrt",
                     Mf::InverseSqrt => "rsqrt",
-                    Mf::Inverse => return Err(Error::UnsupportedCall(format!("{fun:?}"))),
+                    Mf::Inverse => INVERSE_FUNCTION,
                     Mf::Transpose => "transpose",
                     Mf::Determinant => "determinant",
                     Mf::QuantizeToF16 => "",
@@ -2892,7 +2893,7 @@ impl<W: Write> Writer<W> {
                         self.put_expression(arg, context, false)?;
                         write!(self.out, ") * 57.295779513082322865)")?;
                     }
-                    Mf::Modf | Mf::Frexp => {
+                    Mf::Modf | Mf::Frexp | Mf::Inverse => {
                         write!(self.out, "{fun_name}")?;
                         self.put_call_parameters(iter::once(arg), context)?;
                     }
@@ -6214,6 +6215,33 @@ template <typename A>
                 }
                 _ => {}
             },
+
+            // MSL has no matrix inverse function.
+            crate::MathFunction::Inverse => {
+                let crate::TypeInner::Matrix {
+                    columns, scalar, ..
+                } = *arg_ty
+                else {
+                    return Ok(());
+                };
+                let wrapped = WrappedFunction::Math {
+                    fun,
+                    arg_ty: (Some(columns), scalar),
+                };
+                if !self.wrapped_functions.insert(wrapped) {
+                    return Ok(());
+                }
+
+                let mut matrix_ty = String::new();
+                put_numeric_type(&mut matrix_ty, scalar, &[columns, columns])?;
+                back::inverse::write_inverse_function(
+                    &mut self.out,
+                    INVERSE_FUNCTION,
+                    columns,
+                    &matrix_ty,
+                    scalar.to_msl_name(),
+                )?;
+            }
 
             _ => {}
         }
