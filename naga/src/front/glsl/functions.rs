@@ -834,6 +834,14 @@ impl Frontend {
         proxy_writes: &mut Vec<ProxyWrite>,
         arguments: &mut Vec<Handle<Expression>>,
     ) -> Result<()> {
+        // Only pointers to whole variables can be passed directly: WGSL can't take
+        // the address of a vector component and only accepts pointers to whole
+        // variables as arguments, and SPIR-V's logical addressing model requires
+        // pointer arguments to be memory object declarations.
+        let is_whole_variable = matches!(
+            ctx.expressions[original],
+            Expression::LocalVariable(_) | Expression::FunctionArgument(_)
+        );
         let original_ty = ctx.resolve_type(original, meta)?;
         let original_pointer_space = original_ty.pointer_space();
 
@@ -851,13 +859,16 @@ impl Frontend {
             )),
             // If the argument is a pointer whose address space isn't `Function`, an
             // indirection through a local variable is needed to align the address
-            // spaces of the call argument and the overload parameter.
-            TypeInner::Pointer { base, space } if space != AddressSpace::Function => Some(base),
-            TypeInner::ValuePointer {
-                size,
-                scalar,
-                space,
-            } if space != AddressSpace::Function => {
+            // spaces of the call argument and the overload parameter. The same
+            // applies to pointers into part of a variable.
+            TypeInner::Pointer { base, space }
+                if space != AddressSpace::Function || !is_whole_variable =>
+            {
+                Some(base)
+            }
+            // Pointers to vector components or matrix columns always point
+            // into part of a variable.
+            TypeInner::ValuePointer { size, scalar, .. } => {
                 let inner = match size {
                     Some(size) => TypeInner::Vector { size, scalar },
                     None => TypeInner::Scalar(scalar),
