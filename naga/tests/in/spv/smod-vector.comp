@@ -1,0 +1,16 @@
+#version 450
+// glslang lowers `%` on signed integer vectors to OpSMod.
+
+layout(set = 0, binding = 0) buffer Data {
+    ivec2 a;
+    ivec2 b;
+    ivec4 c;
+    int d;
+};
+
+layout(local_size_x = 1) in;
+void main() {
+    a = a % b;
+    c = c % ivec4(3);
+    d = d % 7;
+}

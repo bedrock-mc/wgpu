@@ -891,7 +891,9 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     let result_ty = self.lookup_type.lookup(result_type_id)?;
                     let inner = &ctx.module.types[result_ty.handle].inner;
                     let kind = inner.scalar_kind().unwrap();
-                    let size = inner.size(ctx.gctx()) as u8;
+                    // `As::convert` takes the scalar width, not the byte size of the
+                    // whole (possibly vector) type.
+                    let size = inner.scalar_width().unwrap();
 
                     let left_cast = ctx.expressions.append(
                         crate::Expression::As {
