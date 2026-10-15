@@ -543,11 +543,8 @@ impl Frontend {
 
         // Possibly contains the overload to be used in the call
         let mut maybe_overload = None;
-        // The conversions needed for the best analyzed overload, this is initialized all to
-        // `NONE` to make sure that conversions always pass the first time without ambiguity
-        let mut old_conversions = vec![Conversion::None; args.len()];
-        // Tracks whether the comparison between overloads lead to an ambiguity
-        let mut ambiguous = false;
+        // Every viable overload with the conversions each argument needs to call it
+        let mut candidates: Vec<(&Overload, Vec<Conversion>)> = Vec::new();
 
         // Iterate over all the available overloads to select either an exact match or a
         // overload which has suitable implicit conversions
@@ -562,17 +559,9 @@ impl Frontend {
 
             // Stores whether the current overload matches exactly the function call
             let mut exact = true;
-            // State of the selection
-            // If None we still don't know what is the best overload
-            // If Some(true) the new overload is better
-            // If Some(false) the old overload is better
-            let mut superior = None;
-            // Store the conversions for the current overload so that later they can replace the
-            // conversions used for querying the best overload
-            let mut new_conversions = vec![Conversion::None; args.len()];
+            // The conversions each argument needs to call the current overload
+            let mut conversions = Vec::with_capacity(args.len());
 
-            // Loop through the overload parameters and check if the current overload is better
-            // compared to the previous best overload.
             for (i, overload_parameter) in overload.parameters.iter().enumerate() {
                 let call_argument = &args[i];
                 let parameter_info = &overload.parameters_info[i];
@@ -645,11 +634,11 @@ impl Frontend {
                     }
 
                     // The images satisfy the conditions to be considered as an exact match
-                    new_conversions[i] = Conversion::Exact;
+                    conversions.push(Conversion::Exact);
                     continue;
                 } else if overload_param_ty == call_arg_ty {
                     // If the types match there's no need to check for conversions so continue
-                    new_conversions[i] = Conversion::Exact;
+                    conversions.push(Conversion::Exact);
                     continue;
                 }
 
@@ -678,52 +667,14 @@ impl Frontend {
                     conversion(overload_param_ty, call_arg_ty)
                 };
 
-                let conversion = match maybe_conversion {
-                    Some(info) => info,
+                match maybe_conversion {
+                    Some(conversion) => conversions.push(conversion),
                     None => continue 'outer,
-                };
+                }
 
                 // At this point a conversion will be needed so the overload no longer
                 // exactly matches the call arguments
                 exact = false;
-
-                // Compare the conversions needed for this overload parameter to that of the
-                // last overload analyzed respective parameter, the value is:
-                // - `true` when the new overload argument has a better conversion
-                // - `false` when the old overload argument has a better conversion
-                let best_arg = match (conversion, old_conversions[i]) {
-                    // An exact match is always better, we don't need to check this for the
-                    // current overload since it was checked earlier
-                    (_, Conversion::Exact) => false,
-                    // No overload was yet analyzed so this one is the best yet
-                    (_, Conversion::None) => true,
-                    // A conversion from a float to a double is the best possible conversion
-                    (Conversion::FloatToDouble, _) => true,
-                    (_, Conversion::FloatToDouble) => false,
-                    // A conversion from a float to an integer is preferred than one
-                    // from double to an integer
-                    (Conversion::IntToFloat, Conversion::IntToDouble) => true,
-                    (Conversion::IntToDouble, Conversion::IntToFloat) => false,
-                    // This case handles things like no conversion and exact which were already
-                    // treated and other cases which no conversion is better than the other
-                    _ => continue,
-                };
-
-                // Check if the best parameter corresponds to the current selected overload
-                // to pass to the next comparison, if this isn't true mark it as ambiguous
-                match best_arg {
-                    true => match superior {
-                        Some(false) => ambiguous = true,
-                        _ => {
-                            superior = Some(true);
-                            new_conversions[i] = conversion
-                        }
-                    },
-                    false => match superior {
-                        Some(true) => ambiguous = true,
-                        _ => superior = Some(false),
-                    },
-                }
             }
 
             // The overload matches exactly the function call so there's no ambiguity (since
@@ -731,39 +682,35 @@ impl Frontend {
             // further querying is needed.
             if exact {
                 maybe_overload = Some(overload);
-                ambiguous = false;
+                candidates.clear();
                 break;
             }
 
-            match superior {
-                // New overload is better keep it
-                Some(true) => {
-                    maybe_overload = Some(overload);
-                    // Replace the conversions
-                    old_conversions = new_conversions;
-                }
-                // Old overload is better do nothing
-                Some(false) => {}
-                // No overload was better than the other this can be caused
-                // when all conversions are ambiguous in which the overloads themselves are
-                // ambiguous.
-                None => {
-                    ambiguous = true;
-                    // Assign the new overload, this helps ensures that in this case of
-                    // ambiguity the parsing won't end immediately and allow for further
-                    // collection of errors.
-                    maybe_overload = Some(overload);
-                }
-            }
+            candidates.push((overload, conversions));
         }
 
-        if ambiguous {
-            self.errors.push(Error {
-                kind: ErrorKind::SemanticError(
-                    format!("Ambiguous best function for '{name}'").into(),
-                ),
-                meta,
-            })
+        // Without an exact match, the GLSL rules (4.60 § 6.1) select the overload
+        // that is better than every other viable overload: one that needs a better
+        // conversion for at least one argument and a worse one for none.
+        if !candidates.is_empty() {
+            let best = candidates.iter().position(|(_, a)| {
+                candidates
+                    .iter()
+                    .all(|(_, b)| core::ptr::eq(a, b) || is_better_overload(a, b))
+            });
+
+            if best.is_none() {
+                self.errors.push(Error {
+                    kind: ErrorKind::SemanticError(
+                        format!("Ambiguous best function for '{name}'").into(),
+                    ),
+                    meta,
+                })
+            }
+
+            // In case of ambiguity still pick an overload so that parsing continues and
+            // further errors are collected.
+            maybe_overload = Some(candidates[best.unwrap_or(0)].0);
         }
 
         let overload = maybe_overload.ok_or_else(|| Error {
@@ -1514,8 +1461,39 @@ enum Conversion {
     IntToDouble,
     /// Other type of conversion needed
     Other,
-    /// No conversion was yet registered
-    None,
+}
+
+impl Conversion {
+    /// Whether this conversion is better than `other` according to the GLSL
+    /// overload resolution rules (4.60 § 6.1):
+    /// - an exact match is better than any conversion,
+    /// - a float to double promotion is better than any other conversion,
+    /// - an int or uint to float conversion is better than one to double.
+    fn is_better_than(self, other: Self) -> bool {
+        match (self, other) {
+            (a, b) if a == b => false,
+            (Conversion::Exact, _) => true,
+            (_, Conversion::Exact) => false,
+            (Conversion::FloatToDouble, _) => true,
+            (_, Conversion::FloatToDouble) => false,
+            (Conversion::IntToFloat, Conversion::IntToDouble) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Whether an overload needing the argument conversions `a` is better than one
+/// needing `b`: `a` needs a better conversion for at least one argument and a
+/// worse conversion for none.
+fn is_better_overload(a: &[Conversion], b: &[Conversion]) -> bool {
+    let mut better = false;
+    for (&a, &b) in a.iter().zip(b) {
+        if b.is_better_than(a) {
+            return false;
+        }
+        better |= a.is_better_than(b);
+    }
+    better
 }
 
 /// Helper function, returns the type of conversion from `source` to `target`, if a
