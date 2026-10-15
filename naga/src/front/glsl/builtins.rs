@@ -11,7 +11,8 @@ use super::{
 use crate::{
     BinaryOperator, DerivativeAxis as Axis, DerivativeControl as Ctrl, Expression, Handle,
     ImageClass, ImageDimension as Dim, ImageQuery, MathFunction, Module, RelationalFunction,
-    SampleLevel, Scalar, ScalarKind as Sk, Span, Type, TypeInner, UnaryOperator, VectorSize,
+    SampleLevel, Scalar, ScalarKind as Sk, Span, SwizzleComponent, Type, TypeInner, UnaryOperator,
+    VectorSize,
 };
 
 impl crate::ScalarKind {
@@ -261,6 +262,51 @@ pub fn inject_builtin(
                         .overloads
                         .push(module.add_builtin(args, builtin));
                 }
+            };
+
+            texture_args_generator(TextureArgsOptions::SHADOW | variations.into(), f)
+        }
+        "textureGather" | "textureGatherOffset" => {
+            // textureGather(gsampler2D[Array]/Cube[Array], P, [int comp])
+            // textureGather(sampler2D[Array]/Cube[Array]Shadow, P, float refZ)
+            // textureGatherOffset(gsampler2D[Array], P, ivec2 offset, [int comp])
+            // textureGatherOffset(sampler2D[Array]Shadow, P, float refZ, ivec2 offset)
+            let offset = name == "textureGatherOffset";
+            let f = |kind, dim, arrayed, multi, shadow| {
+                if multi || !matches!(dim, Dim::D2 | Dim::Cube) || (offset && dim == Dim::Cube) {
+                    return;
+                }
+
+                let class = match shadow {
+                    true => ImageClass::Depth { multi },
+                    false => ImageClass::Sampled { kind, multi },
+                };
+                let image = TypeInner::Image {
+                    dim,
+                    arrayed,
+                    class,
+                };
+                let num_coords = image_dims_to_coords_size(dim) + arrayed as usize;
+
+                let mut args = vec![image, make_coords_arg(num_coords, Sk::Float)];
+                if shadow {
+                    args.push(TypeInner::Scalar(Scalar::F32));
+                }
+                if offset {
+                    args.push(make_coords_arg(2, Sk::Sint));
+                }
+
+                let builtin = MacroCall::TextureGather { offset, shadow };
+                if !shadow {
+                    let mut args = args.clone();
+                    args.push(TypeInner::Scalar(Scalar::I32));
+                    declaration
+                        .overloads
+                        .push(module.add_builtin(args, builtin));
+                }
+                declaration
+                    .overloads
+                    .push(module.add_builtin(args, builtin));
             };
 
             texture_args_generator(TextureArgsOptions::SHADOW | variations.into(), f)
@@ -1579,6 +1625,10 @@ pub enum MacroCall {
         shadow: bool,
         level_type: TextureLevelType,
     },
+    TextureGather {
+        offset: bool,
+        shadow: bool,
+    },
     TextureSize {
         arrayed: bool,
     },
@@ -1746,6 +1796,80 @@ impl MacroCall {
                 }
 
                 texture_call(ctx, args[0], level, comps, texture_offset, meta)?
+            }
+
+            MacroCall::TextureGather { offset, shadow } => {
+                let Some(sampler) = ctx.samplers.get(&args[0]).copied() else {
+                    return Err(Error {
+                        kind: ErrorKind::SemanticError("Bad call".into()),
+                        meta,
+                    });
+                };
+                let (size, arrayed) = match *ctx.resolve_type(args[0], meta)? {
+                    TypeInner::Image {
+                        dim: Dim::Cube,
+                        arrayed,
+                        ..
+                    } => (VectorSize::Tri, arrayed),
+                    TypeInner::Image { arrayed, .. } => (VectorSize::Bi, arrayed),
+                    _ => unreachable!(),
+                };
+
+                // The array layer, if any, is the last coordinate component
+                let (coordinate, array_index) = if arrayed {
+                    let coordinate = ctx.vector_resize(size, args[1], Span::default())?;
+                    let mut array_index = ctx.add_expression(
+                        Expression::AccessIndex {
+                            base: args[1],
+                            index: size as u32,
+                        },
+                        Span::default(),
+                    )?;
+                    ctx.conversion(&mut array_index, meta, Scalar::I32)?;
+                    (coordinate, Some(array_index))
+                } else {
+                    (args[1], None)
+                };
+
+                let mut extra_args = args[2..].iter().copied();
+                let depth_ref = if shadow { extra_args.next() } else { None };
+                let texel_offset = if offset { extra_args.next() } else { None };
+
+                // The component to gather must be a constant expression in 0..=3
+                let component = match extra_args.next() {
+                    None => SwizzleComponent::X,
+                    Some(comp) => match ctx
+                        .module
+                        .to_ctx()
+                        .get_const_val_from::<u32, _>(comp, &ctx.expressions)
+                    {
+                        Ok(index @ 0..=3) => SwizzleComponent::XYZW[index as usize],
+                        _ => {
+                            return Err(Error {
+                                kind: ErrorKind::SemanticError(
+                                    "textureGather component must be a constant expression in the range [0, 3]"
+                                        .into(),
+                                ),
+                                meta,
+                            })
+                        }
+                    },
+                };
+
+                ctx.add_expression(
+                    Expression::ImageSample {
+                        image: args[0],
+                        sampler,
+                        gather: Some(component),
+                        coordinate,
+                        array_index,
+                        offset: texel_offset,
+                        level: SampleLevel::Zero,
+                        depth_ref,
+                        clamp_to_edge: false,
+                    },
+                    meta,
+                )?
             }
 
             MacroCall::TextureSize { arrayed } => {
