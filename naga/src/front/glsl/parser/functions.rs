@@ -282,7 +282,7 @@ impl ParsingContext<'_> {
                                 fall_through = false;
                             }
 
-                            ctx.body.cull(idx..)
+                            cull_unreachable(ctx, idx)
                         }
 
                         Ok(())
@@ -420,7 +420,7 @@ impl ParsingContext<'_> {
                     );
 
                     if let Some(idx) = terminator {
-                        ctx.body.cull(idx..)
+                        cull_unreachable(ctx, idx)
                     }
                     Ok(())
                 })?;
@@ -613,7 +613,7 @@ impl ParsingContext<'_> {
         }
 
         if let Some(idx) = *terminator {
-            ctx.body.cull(idx..)
+            cull_unreachable(ctx, idx)
         }
 
         ctx.symbol_table.pop_scope();
@@ -662,4 +662,68 @@ impl ParsingContext<'_> {
 
         Ok(())
     }
+}
+
+/// Removes the statements of the current block from index `from` onwards, which
+/// follow a terminator and are therefore unreachable.
+///
+/// The `CallResult` and `AtomicResult` expressions of the removed statements
+/// would be left without the statement that must visit them, so they are
+/// replaced by zero values of the same type.
+fn cull_unreachable(ctx: &mut Context, from: usize) {
+    fn orphan_results(block: &[Statement], results: &mut Vec<crate::Handle<Expression>>) {
+        for statement in block {
+            match *statement {
+                Statement::Call {
+                    result: Some(result),
+                    ..
+                }
+                | Statement::Atomic {
+                    result: Some(result),
+                    ..
+                } => results.push(result),
+                Statement::Block(ref block) => orphan_results(block, results),
+                Statement::If {
+                    ref accept,
+                    ref reject,
+                    ..
+                } => {
+                    orphan_results(accept, results);
+                    orphan_results(reject, results);
+                }
+                Statement::Loop {
+                    ref body,
+                    ref continuing,
+                    ..
+                } => {
+                    orphan_results(body, results);
+                    orphan_results(continuing, results);
+                }
+                Statement::Switch { ref cases, .. } => {
+                    for case in cases {
+                        orphan_results(&case.body, results);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    orphan_results(&ctx.body[from..], &mut results);
+    for result in results {
+        let ty = match ctx.expressions[result] {
+            Expression::CallResult(function) => ctx.module.functions[function]
+                .result
+                .as_ref()
+                .map(|result| result.ty),
+            Expression::AtomicResult { ty, .. } => Some(ty),
+            _ => None,
+        };
+        if let Some(ty) = ty {
+            ctx.expressions[result] = Expression::ZeroValue(ty);
+        }
+    }
+
+    ctx.body.cull(from..)
 }
