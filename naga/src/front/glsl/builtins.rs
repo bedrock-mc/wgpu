@@ -1392,8 +1392,36 @@ fn inject_common_builtin(
                 declaration.overloads.push(module.add_builtin(args, fun))
             }
         }
-        // TODO: https://github.com/gfx-rs/naga/issues/2526
-        // "modf" | "frexp" => { ... }
+        "modf" | "frexp" => {
+            // bits layout
+            // bit 0 through 1 - dims
+            for bits in 0..0b100 {
+                let size = match bits {
+                    0b00 => None,
+                    0b01 => Some(VectorSize::Bi),
+                    0b10 => Some(VectorSize::Tri),
+                    _ => Some(VectorSize::Quad),
+                };
+                let ty = |scalar| match size {
+                    Some(size) => TypeInner::Vector { size, scalar },
+                    None => TypeInner::Scalar(scalar),
+                };
+
+                let (fun, out_scalar) = match name {
+                    "modf" => (MathFunction::Modf, float_scalar),
+                    "frexp" => (MathFunction::Frexp, Scalar::I32),
+                    _ => unreachable!(),
+                };
+
+                let mut overload = module.add_builtin(
+                    vec![ty(float_scalar), ty(out_scalar)],
+                    MacroCall::MathFunctionWithOut(fun),
+                );
+                overload.parameters_info[1].qualifier = ParameterQualifier::Out;
+
+                declaration.overloads.push(overload)
+            }
+        }
         "cross" => {
             let args = vec![
                 TypeInner::Vector {
@@ -1560,6 +1588,10 @@ pub enum MacroCall {
     },
     ImageStore,
     MathFunction(MathFunction),
+    /// A math function (`Modf` or `Frexp`) whose result is a predeclared
+    /// struct: the first member is returned and the second member is stored
+    /// to the last, `out`, argument.
+    MathFunctionWithOut(MathFunction),
     FindLsbUint,
     FindMsbUint,
     BitfieldExtract,
@@ -1841,6 +1873,51 @@ impl MacroCall {
                 },
                 Span::default(),
             )?,
+            MacroCall::MathFunctionWithOut(fun) => {
+                let (size, scalar) = match *ctx.resolve_type(args[0], meta)? {
+                    TypeInner::Scalar(scalar) => (None, scalar),
+                    TypeInner::Vector { size, scalar } => (Some(size), scalar),
+                    _ => unreachable!(),
+                };
+                ctx.module.generate_predeclared_type(match fun {
+                    MathFunction::Modf => crate::PredeclaredType::ModfResult { size, scalar },
+                    MathFunction::Frexp => crate::PredeclaredType::FrexpResult { size, scalar },
+                    _ => unreachable!(),
+                });
+
+                let result = ctx.add_expression(
+                    Expression::Math {
+                        fun,
+                        arg: args[0],
+                        arg1: None,
+                        arg2: None,
+                        arg3: None,
+                    },
+                    Span::default(),
+                )?;
+                let out_value = ctx.add_expression(
+                    Expression::AccessIndex {
+                        base: result,
+                        index: 1,
+                    },
+                    Span::default(),
+                )?;
+                ctx.emit_restart();
+                ctx.body.push(
+                    crate::Statement::Store {
+                        pointer: args[1],
+                        value: out_value,
+                    },
+                    meta,
+                );
+                ctx.add_expression(
+                    Expression::AccessIndex {
+                        base: result,
+                        index: 0,
+                    },
+                    Span::default(),
+                )?
+            }
             mc @ (MacroCall::FindLsbUint | MacroCall::FindMsbUint) => {
                 let fun = match mc {
                     MacroCall::FindLsbUint => MathFunction::FirstTrailingBit,

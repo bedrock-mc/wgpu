@@ -763,7 +763,7 @@ impl Frontend {
             arguments.push(handle)
         }
 
-        match kind {
+        let result = match kind {
             FunctionKind::Call(function) => {
                 ctx.emit_end();
 
@@ -784,34 +784,40 @@ impl Frontend {
 
                 ctx.emit_start();
 
-                // Write back all the variables that were scheduled to their original place
-                for proxy_write in proxy_writes {
-                    let mut value = ctx.add_expression(
-                        Expression::Load {
-                            pointer: proxy_write.value,
-                        },
-                        meta,
-                    )?;
-
-                    if let Some(scalar) = proxy_write.convert {
-                        ctx.conversion(&mut value, meta, scalar)?;
-                    }
-
-                    ctx.emit_restart();
-
-                    ctx.body.push(
-                        Statement::Store {
-                            pointer: proxy_write.target,
-                            value,
-                        },
-                        meta,
-                    );
-                }
-
-                Ok(result)
+                result
             }
-            FunctionKind::Macro(builtin) => builtin.call(self, ctx, arguments.as_mut_slice(), meta),
+            // Builtins with `out` parameters (`modf`, `frexp`) store to their
+            // arguments, which may also need proxy writes.
+            FunctionKind::Macro(builtin) => {
+                builtin.call(self, ctx, arguments.as_mut_slice(), meta)?
+            }
+        };
+
+        // Write back all the variables that were scheduled to their original place
+        for proxy_write in proxy_writes {
+            let mut value = ctx.add_expression(
+                Expression::Load {
+                    pointer: proxy_write.value,
+                },
+                meta,
+            )?;
+
+            if let Some(scalar) = proxy_write.convert {
+                ctx.conversion(&mut value, meta, scalar)?;
+            }
+
+            ctx.emit_restart();
+
+            ctx.body.push(
+                Statement::Store {
+                    pointer: proxy_write.target,
+                    value,
+                },
+                meta,
+            );
         }
+
+        Ok(result)
     }
 
     /// Processes a function call argument that appears in place of an output
