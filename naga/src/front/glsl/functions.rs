@@ -67,7 +67,7 @@ impl Frontend {
     ) -> Result<Handle<Expression>> {
         let expr_type = ctx.resolve_type(value, expr_meta)?;
 
-        let vector_size = match *expr_type {
+        let mut vector_size = match *expr_type {
             TypeInner::Vector { size, .. } => Some(size),
             _ => None,
         };
@@ -81,6 +81,31 @@ impl Frontend {
                     width: 4,
                     ..result_scalar
                 };
+
+                // Shape the condition like the result: the first component of a
+                // vector for a scalar result, or a resized vector for a vector one.
+                let result_size = match ctx.module.types[ty].inner {
+                    TypeInner::Vector { size, .. } => Some(size),
+                    _ => None,
+                };
+                match (vector_size, result_size) {
+                    (Some(_), None) => {
+                        value = ctx.add_expression(
+                            Expression::AccessIndex {
+                                base: value,
+                                index: 0,
+                            },
+                            expr_meta,
+                        )?;
+                        vector_size = None;
+                    }
+                    (Some(size), Some(result_size)) if size != result_size => {
+                        value = ctx.vector_resize(result_size, value, expr_meta)?;
+                        vector_size = Some(result_size);
+                    }
+                    _ => {}
+                }
+
                 let l0 = Literal::zero(result_scalar).unwrap();
                 let l1 = Literal::one(result_scalar).unwrap();
                 let mut reject = ctx.add_expression(Expression::Literal(l0), expr_meta)?;
@@ -89,7 +114,7 @@ impl Frontend {
                 ctx.implicit_splat(&mut reject, meta, vector_size)?;
                 ctx.implicit_splat(&mut accept, meta, vector_size)?;
 
-                let h = ctx.add_expression(
+                let mut h = ctx.add_expression(
                     Expression::Select {
                         accept,
                         reject,
@@ -97,6 +122,11 @@ impl Frontend {
                     },
                     expr_meta,
                 )?;
+
+                // A scalar bool splats to every component of a vector result.
+                if let (None, Some(size)) = (vector_size, result_size) {
+                    h = ctx.add_expression(Expression::Splat { size, value: h }, meta)?;
+                }
 
                 return Ok(h);
             }
