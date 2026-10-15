@@ -1924,7 +1924,9 @@ impl<W: Write> Writer<W> {
                 let fun_name = match fun {
                     Rf::All => "all",
                     Rf::Any => "any",
-                    _ => return Err(Error::UnsupportedRelationalFunction(fun)),
+                    Rf::IsNan | Rf::IsInf => {
+                        return self.write_is_nan_or_inf(module, fun, argument, func_ctx);
+                    }
                 };
                 write!(self.out, "{fun_name}(")?;
 
@@ -1980,6 +1982,63 @@ impl<W: Write> Writer<W> {
                 write!(self.out, ")")?;
             }
         }
+
+        Ok(())
+    }
+
+    /// Writes `isNan`/`isInf`, which WGSL lacks, as a test of the exponent and
+    /// mantissa bits of the (`f32`) argument, e.g.
+    /// `((bitcast<vec3<u32>>(x) & vec3(0x7fffffffu)) > vec3(0x7f800000u))`.
+    ///
+    /// The bit test is used rather than `x != x` because WGSL implementations
+    /// may assume that values are never NaN or infinite when optimizing
+    /// floating-point comparisons. `f16` arguments are first converted to `f32`,
+    /// which preserves NaN and infinity.
+    fn write_is_nan_or_inf(
+        &mut self,
+        module: &Module,
+        fun: crate::RelationalFunction,
+        argument: Handle<crate::Expression>,
+        func_ctx: &back::FunctionCtx<'_>,
+    ) -> BackendResult {
+        let (size, scalar) = match *func_ctx.resolve_type(argument, &module.types) {
+            TypeInner::Scalar(scalar) => (None, scalar),
+            TypeInner::Vector { size, scalar } => (Some(size), scalar),
+            _ => return Err(Error::UnsupportedRelationalFunction(fun)),
+        };
+        if scalar != crate::Scalar::F32 && scalar != crate::Scalar::F16 {
+            return Err(Error::UnsupportedRelationalFunction(fun));
+        }
+
+        // `vecN<T>`/`vecN(c)` for vectors, `T`/`c` for scalars
+        let n = size.map_or("", common::vector_size_str);
+        let ty = |scalar: &str| match size {
+            Some(_) => format!("vec{n}<{scalar}>"),
+            None => scalar.to_string(),
+        };
+        let constant = |value: &str| match size {
+            Some(_) => format!("vec{n}({value})"),
+            None => value.to_string(),
+        };
+
+        write!(self.out, "((bitcast<{}>(", ty("u32"))?;
+        if scalar == crate::Scalar::F16 {
+            write!(self.out, "{}(", ty("f32"))?;
+            self.write_expr(module, argument, func_ctx)?;
+            write!(self.out, ")")?;
+        } else {
+            self.write_expr(module, argument, func_ctx)?;
+        }
+        let op = match fun {
+            crate::RelationalFunction::IsNan => ">",
+            _ => "==",
+        };
+        write!(
+            self.out,
+            ") & {}) {op} {})",
+            constant("0x7fffffffu"),
+            constant("0x7f800000u")
+        )?;
 
         Ok(())
     }
