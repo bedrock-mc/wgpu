@@ -516,7 +516,12 @@ impl Frontend {
             TypeInner::Struct { ref members, .. } => Some(
                 members
                     .iter()
-                    .map(|member| scalar_components(&ctx.module.types[member.ty].inner))
+                    .map(|member| {
+                        (
+                            member.ty,
+                            scalar_components(&ctx.module.types[member.ty].inner),
+                        )
+                    })
                     .collect::<Vec<_>>(),
             ),
             _ => {
@@ -528,12 +533,13 @@ impl Frontend {
         };
 
         if let Some(struct_member_data) = struct_member_data {
-            for ((mut arg, meta), scalar_components) in
+            for ((mut arg, meta), (member_ty, scalar_components)) in
                 args.iter().copied().zip(struct_member_data.iter().copied())
             {
                 if let Some(scalar) = scalar_components {
                     ctx.implicit_conversion(&mut arg, meta, scalar)?;
                 }
+                array_layout_conversion(ctx, &mut arg, member_ty, meta)?;
 
                 components.push(arg)
             }
@@ -1541,6 +1547,55 @@ fn is_better_overload(a: &[Conversion], b: &[Conversion]) -> bool {
         better |= a.is_better_than(b);
     }
     better
+}
+
+/// Converts `expr`, an array value, to the array type `target` when the two only
+/// differ in their layout.
+///
+/// GLSL array types don't depend on where they are declared, but naga array
+/// types carry a stride: an array member of a struct uses the std140 stride
+/// while a local `float[6](...)` uses the natural one. Such a value is rebuilt
+/// element by element with the target type.
+fn array_layout_conversion(
+    ctx: &mut Context,
+    expr: &mut Handle<Expression>,
+    target: Handle<Type>,
+    meta: Span,
+) -> Result<()> {
+    let target_inner = ctx.module.types[target].inner.clone();
+    let TypeInner::Array {
+        base: target_base,
+        size: crate::ArraySize::Constant(target_size),
+        ..
+    } = target_inner
+    else {
+        return Ok(());
+    };
+    match *ctx.resolve_type(*expr, meta)? {
+        ref source if *source == target_inner => return Ok(()),
+        TypeInner::Array {
+            size: crate::ArraySize::Constant(size),
+            ..
+        } if size == target_size => {}
+        _ => return Ok(()),
+    }
+
+    let mut components = Vec::with_capacity(target_size.get() as usize);
+    for index in 0..target_size.get() {
+        let mut element =
+            ctx.add_expression(Expression::AccessIndex { base: *expr, index }, meta)?;
+        array_layout_conversion(ctx, &mut element, target_base, meta)?;
+        components.push(element);
+    }
+    *expr = ctx.add_expression(
+        Expression::Compose {
+            ty: target,
+            components,
+        },
+        meta,
+    )?;
+
+    Ok(())
 }
 
 /// Helper function, returns the type of conversion from `source` to `target`, if a
