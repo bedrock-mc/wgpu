@@ -276,6 +276,10 @@ impl ParsingContext<'_> {
                             if let Statement::Break = ctx.body[idx - 1] {
                                 fall_through = false;
                                 idx -= 1;
+                            } else if ctx.body[idx - 1].is_terminator() {
+                                // A case ending in `return`, `discard` or `continue`
+                                // never reaches the next case.
+                                fall_through = false;
                             }
 
                             ctx.body.cull(idx..)
