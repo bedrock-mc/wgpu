@@ -1,0 +1,26 @@
+#version 450
+// `barrier()` is a workgroup control barrier that orders `shared` memory; it
+// must not request a subgroup barrier (which needs SUBGROUP_BARRIER).
+
+layout(local_size_x = 64) in;
+
+shared float values[64];
+
+layout(set = 0, binding = 0) buffer Output {
+    float result[];
+};
+
+void main() {
+    uint i = gl_LocalInvocationIndex;
+    values[i] = float(i);
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (i < stride) {
+            values[i] += values[i + stride];
+        }
+        barrier();
+    }
+    if (i == 0u) {
+        result[gl_WorkGroupID.x] = values[0];
+    }
+}

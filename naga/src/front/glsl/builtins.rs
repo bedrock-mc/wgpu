@@ -2235,9 +2235,14 @@ impl MacroCall {
                 Span::default(),
             )?,
             MacroCall::Barrier => {
+                // GLSL's `barrier()` synchronizes the invocations of a workgroup and
+                // orders accesses to `shared` variables, like glslang's
+                // `OpControlBarrier(Workgroup, Workgroup, AcquireRelease | WorkgroupMemory)`.
+                // `Barrier::all()` would also request a subgroup barrier, which needs
+                // the `SUBGROUP_BARRIER` capability.
                 ctx.emit_restart();
                 ctx.body.push(
-                    crate::Statement::ControlBarrier(crate::Barrier::all()),
+                    crate::Statement::ControlBarrier(crate::Barrier::WORK_GROUP),
                     meta,
                 );
                 return Ok(None);
