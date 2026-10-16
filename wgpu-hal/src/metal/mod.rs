@@ -27,6 +27,8 @@ mod device;
 #[cfg(target_os = "macos")]
 mod display_link;
 mod library_from_metallib;
+#[cfg(target_os = "macos")]
+mod mailbox;
 mod surface;
 mod time;
 
@@ -151,7 +153,7 @@ pub struct Instance {
 
 impl Instance {
     pub fn create_surface_from_layer(&self, layer: &CAMetalLayer) -> Surface {
-        Surface::from_layer(layer)
+        Surface::from_layer(layer).with_flags(self.flags)
     }
 }
 
@@ -192,7 +194,7 @@ impl crate::Instance for Instance {
             Retained::from_raw(layer.into_raw().cast::<CAMetalLayer>().as_ptr()).unwrap()
         };
 
-        Ok(Surface::new(layer))
+        Ok(Surface::new(layer).with_flags(self.flags))
     }
 
     unsafe fn enumerate_adapters(
@@ -654,6 +656,9 @@ pub struct Surface {
     extent: RwLock<wgt::Extent3d>,
     #[cfg(target_os = "macos")]
     display_link: Mutex<Option<display_link::DisplayLink>>,
+    #[cfg(target_os = "macos")]
+    mailbox: Mutex<Option<mailbox::Mailbox>>,
+    async_windowed: bool,
 }
 
 unsafe impl Send for Surface {}
@@ -662,10 +667,17 @@ unsafe impl Sync for Surface {}
 #[derive(Debug)]
 pub struct SurfaceTexture {
     texture: Texture,
-    // Useful for UI-intensive applications that are sensitive to
-    // window resizing.
-    drawable: Retained<ProtocolObject<dyn MTLDrawable>>,
-    present_with_transaction: bool,
+    output: SurfaceOutput,
+}
+
+#[derive(Debug)]
+enum SurfaceOutput {
+    Drawable {
+        drawable: Retained<ProtocolObject<dyn MTLDrawable>>,
+        present_with_transaction: bool,
+    },
+    #[cfg(target_os = "macos")]
+    Mailbox(mailbox::Frame),
 }
 
 impl crate::DynSurfaceTexture for SurfaceTexture {}
@@ -821,6 +833,14 @@ impl crate::Queue for Queue {
         _surface: &Surface,
         texture: SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
+        let (drawable, present_with_transaction) = match texture.output {
+            SurfaceOutput::Drawable {
+                drawable,
+                present_with_transaction,
+            } => (drawable, present_with_transaction),
+            #[cfg(target_os = "macos")]
+            SurfaceOutput::Mailbox(frame) => return frame.submit(&self.shared.raw),
+        };
         autoreleasepool(|_| {
             // We do not bother adjusting `command_buffer_created_not_submitted`
             // because we immediately commit this buffer.
@@ -828,15 +848,15 @@ impl crate::Queue for Queue {
             command_buffer.setLabel(Some(ns_string!("(wgpu internal) Present")));
 
             // https://developer.apple.com/documentation/quartzcore/cametallayer/1478157-presentswithtransaction?language=objc
-            if !texture.present_with_transaction {
-                command_buffer.presentDrawable(&texture.drawable);
+            if !present_with_transaction {
+                command_buffer.presentDrawable(&drawable);
             }
 
             command_buffer.commit();
 
-            if texture.present_with_transaction {
+            if present_with_transaction {
                 command_buffer.waitUntilScheduled();
-                texture.drawable.present();
+                drawable.present();
             }
         });
         Ok(())

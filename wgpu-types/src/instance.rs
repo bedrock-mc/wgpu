@@ -238,6 +238,11 @@ bitflags::bitflags! {
         ///
         /// When `Self::from_env()` is used takes value from `WGPU_STRICT_WEBGPU_COMPLIANCE` environment variable.
         const STRICT_WEBGPU_COMPLIANCE = 1 << 7;
+
+        /// On macOS 14+, render Immediate windowed surfaces into three reusable textures
+        /// and present the newest completed image independently of drawable acquisition.
+        /// Native fullscreen, FIFO and transaction-based presentation keep their direct path.
+        const METAL_ASYNC_WINDOWED_PRESENTATION = 1 << 8;
     }
 }
 

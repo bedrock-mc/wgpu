@@ -42,7 +42,16 @@ impl super::Surface {
             extent: RwLock::new(wgt::Extent3d::default()),
             #[cfg(target_os = "macos")]
             display_link: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            mailbox: Mutex::new(None),
+            async_windowed: false,
         }
+    }
+
+    /// Applies instance-specific presentation policy before any surface configuration.
+    pub(super) fn with_flags(mut self, flags: wgt::InstanceFlags) -> Self {
+        self.async_windowed = flags.contains(wgt::InstanceFlags::METAL_ASYNC_WINDOWED_PRESENTATION);
+        self
     }
 
     pub fn from_layer(layer: &CAMetalLayer) -> Self {
@@ -257,6 +266,8 @@ impl crate::Surface for super::Surface {
         // Stop callbacks and release prefetched drawables before changing any layer property.
         #[cfg(target_os = "macos")]
         drop(self.display_link.lock().take());
+        #[cfg(target_os = "macos")]
+        drop(self.mailbox.lock().take());
 
         let caps = &device.shared.private_texture_format_caps;
         *self.swapchain_format.write() = Some(config.format);
@@ -346,6 +357,36 @@ impl crate::Surface for super::Surface {
         }
 
         #[cfg(target_os = "macos")]
+        if let Some(main) = objc2::MainThreadMarker::new().filter(|_| {
+            self.async_windowed
+                && !display_sync
+                && super::display_link_delivery_supported()
+                && !render_layer.presentsWithTransaction()
+                && config.composite_alpha_mode == wgt::CompositeAlphaMode::Opaque
+        }) {
+            if let Some(window) = hosting_window(Retained::into_super(render_layer.clone())) {
+                let style: usize = unsafe { objc2::msg_send![&*window, styleMask] };
+                const FULLSCREEN: usize = 1 << 14;
+                if style & FULLSCREEN == 0 {
+                    render_layer.setFramebufferOnly(false);
+                    *self.mailbox.lock() = super::mailbox::Mailbox::new(
+                        render_layer.clone(),
+                        &window,
+                        device_raw,
+                        config,
+                        main,
+                    );
+                    if self.mailbox.lock().is_none() {
+                        render_layer.setFramebufferOnly(framebuffer_only);
+                        log::warn!(
+                            "Metal asynchronous presentation unavailable; using direct drawables"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
         if let Some(main) = objc2::MainThreadMarker::new()
             .filter(|_| display_sync && super::display_link_delivery_supported())
         {
@@ -366,6 +407,8 @@ impl crate::Surface for super::Surface {
     unsafe fn unconfigure(&self, _device: &super::Device) {
         #[cfg(target_os = "macos")]
         drop(self.display_link.lock().take());
+        #[cfg(target_os = "macos")]
+        drop(self.mailbox.lock().take());
         *self.swapchain_format.write() = None;
     }
 
@@ -396,6 +439,22 @@ impl crate::Surface for super::Surface {
         }
 
         #[cfg(target_os = "macos")]
+        if let Some(shared) = self
+            .mailbox
+            .lock()
+            .as_ref()
+            .map(|mailbox| mailbox.shared.clone())
+        {
+            let frame = shared
+                .acquire(_timeout.unwrap_or(core::time::Duration::from_secs(1)))
+                .ok_or(crate::SurfaceError::Timeout)?;
+            return Ok(self.acquired(
+                frame.texture().clone(),
+                super::SurfaceOutput::Mailbox(frame),
+            ));
+        }
+
+        #[cfg(target_os = "macos")]
         let clock = self
             .display_link
             .lock()
@@ -422,33 +481,44 @@ impl crate::Surface for super::Surface {
             Some(pair) => pair,
             None => return Err(crate::SurfaceError::Timeout),
         };
-        let texture = drawable.texture().to_owned();
-
-        let swapchain_format = self.swapchain_format.read().unwrap();
-        let extent = self.extent.read();
-        let suf_texture = super::SurfaceTexture {
-            texture: super::Texture {
-                raw: texture,
-                format: swapchain_format,
-                raw_type: MTLTextureType::Type2D,
-                array_layers: 1,
-                mip_levels: 1,
-                copy_size: crate::CopyExtent {
-                    width: extent.width,
-                    height: extent.height,
-                    depth: 1,
-                },
-                _drop_guard: None,
+        Ok(self.acquired(
+            drawable.texture().to_owned(),
+            super::SurfaceOutput::Drawable {
+                drawable: ProtocolObject::from_retained(drawable),
+                present_with_transaction: render_layer.presentsWithTransaction(),
             },
-            drawable: ProtocolObject::from_retained(drawable),
-            present_with_transaction: render_layer.presentsWithTransaction(),
-        };
-
-        Ok(crate::AcquiredSurfaceTexture {
-            texture: suf_texture,
-            suboptimal: false,
-        })
+        ))
     }
 
     unsafe fn discard_texture(&self, _texture: super::SurfaceTexture) {}
+}
+
+impl super::Surface {
+    /// Wraps a direct drawable or a pooled image with the configured surface's exact format.
+    fn acquired(
+        &self,
+        raw: Retained<ProtocolObject<dyn objc2_metal::MTLTexture>>,
+        output: super::SurfaceOutput,
+    ) -> crate::AcquiredSurfaceTexture<super::Api> {
+        let extent = self.extent.read();
+        crate::AcquiredSurfaceTexture {
+            texture: super::SurfaceTexture {
+                texture: super::Texture {
+                    raw,
+                    format: self.swapchain_format.read().unwrap(),
+                    raw_type: MTLTextureType::Type2D,
+                    array_layers: 1,
+                    mip_levels: 1,
+                    copy_size: crate::CopyExtent {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    },
+                    _drop_guard: None,
+                },
+                output,
+            },
+            suboptimal: false,
+        }
+    }
 }

@@ -46,6 +46,7 @@ Bottom level categories:
 
 #### Metal
 
+- Add opt-in bounded asynchronous windowed presentation, allowing Immediate rendering to run independently of display drawable recycling.
 - Skip empty intermediate command buffers while preserving completion signals and native interop.
 - Deliver FIFO drawables through the native display link for AppKit windows on macOS 14 and later.
 
