@@ -24,6 +24,8 @@ mod adapter;
 mod command;
 mod conv;
 mod device;
+#[cfg(target_os = "macos")]
+mod display_link;
 mod library_from_metallib;
 mod surface;
 mod time;
@@ -174,7 +176,7 @@ impl crate::Instance for Instance {
             _ => {
                 return Err(crate::InstanceError::new(format!(
                     "window handle {window_handle:?} is not a Metal-compatible handle"
-                )))
+                )));
             }
         };
 
@@ -644,6 +646,8 @@ pub struct Surface {
     render_layer: Mutex<Retained<CAMetalLayer>>,
     swapchain_format: RwLock<Option<wgt::TextureFormat>>,
     extent: RwLock<wgt::Extent3d>,
+    #[cfg(target_os = "macos")]
+    display_link: Mutex<Option<display_link::DisplayLink>>,
 }
 
 unsafe impl Send for Surface {}
@@ -781,8 +785,15 @@ impl crate::Queue for Queue {
                 }
             };
 
-            for cmd_buffer in command_buffers {
-                cmd_buffer.raw.commit();
+            for (index, cmd_buffer) in command_buffers.iter().enumerate() {
+                // The last buffer carries the completion signal, even when it is empty.
+                if cmd_buffer.has_commands || index + 1 == command_buffers.len() {
+                    cmd_buffer.raw.commit();
+                } else {
+                    cmd_buffer
+                        .discarded_empty
+                        .store(true, atomic::Ordering::Release);
+                }
                 // One command buffer per `end_encoding` call moves from the
                 // "created but not yet submitted" bucket into the submitted
                 // set, so update the counter.
@@ -1354,6 +1365,7 @@ pub struct CommandEncoder {
     shared: Arc<AdapterShared>,
     queue_shared: Arc<QueueShared>,
     raw_cmd_buf: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    has_commands: atomic::AtomicBool,
     state: CommandState,
     temp: Temp,
     counters: Arc<wgt::HalCounters>,
@@ -1372,6 +1384,8 @@ unsafe impl Sync for CommandEncoder {}
 
 #[derive(Debug)]
 pub struct CommandBuffer {
+    has_commands: bool,
+    discarded_empty: atomic::AtomicBool,
     raw: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     queue_shared: Arc<QueueShared>,
 }

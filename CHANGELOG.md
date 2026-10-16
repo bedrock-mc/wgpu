@@ -42,6 +42,13 @@ Bottom level categories:
 
 ## Unreleased
 
+### Performance
+
+#### Metal
+
+- Skip empty intermediate command buffers while preserving completion signals and native interop.
+- Deliver FIFO drawables through the native display link for AppKit windows on macOS 14 and later.
+
 ## v30.0.1 (2026-08-21)
 
 ### Bug Fixes

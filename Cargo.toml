@@ -218,6 +218,7 @@ objc2 = "0.6.3"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "CFCGTypes",
+    "CFRunLoop",
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -225,6 +226,9 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
+    "NSRunLoop",
+    "NSObjCRuntime",
+    "NSThread",
     "NSError",
     "NSProcessInfo",
     "NSRange",
@@ -273,6 +277,8 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
     "objc2-core-graphics",
     "CALayer",
     "CAMetalLayer",
+    "CAMetalDisplayLink",
+    "CAFrameRateRange",
     "objc2-metal",
 ] }
 raw-window-metal = "1.0"

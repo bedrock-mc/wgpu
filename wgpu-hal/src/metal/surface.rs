@@ -40,6 +40,8 @@ impl super::Surface {
             render_layer: Mutex::new(layer),
             swapchain_format: RwLock::new(None),
             extent: RwLock::new(wgt::Extent3d::default()),
+            #[cfg(target_os = "macos")]
+            display_link: Mutex::new(None),
         }
     }
 
@@ -252,6 +254,10 @@ impl crate::Surface for super::Surface {
     ) -> Result<(), crate::SurfaceError> {
         log::debug!("build swapchain {config:?}");
 
+        // Stop callbacks and release prefetched drawables before changing any layer property.
+        #[cfg(target_os = "macos")]
+        drop(self.display_link.lock().take());
+
         let caps = &device.shared.private_texture_format_caps;
         *self.swapchain_format.write() = Some(config.format);
         *self.extent.write() = config.extent;
@@ -311,7 +317,9 @@ impl crate::Surface for super::Surface {
                 // The ITUR_2100 color space constants require macOS 11.0/iOS 14.0;
                 // `surface_capabilities` only reports BT.2100 PQ/HLG on those OS versions.
                 if !available!(macos = 11.0, ios = 14.0, tvos = 14.0, visionos = 1.0) {
-                    unreachable!("BT.2100 PQ/HLG color spaces are only reported on macOS 11.0+/iOS 14.0+/tvOS 14.0+");
+                    unreachable!(
+                        "BT.2100 PQ/HLG color spaces are only reported on macOS 11.0+/iOS 14.0+/tvOS 14.0+"
+                    );
                 }
                 Some(if config.color_space == wgt::SurfaceColorSpace::Bt2100Pq {
                     COLOR_SPACES.as_ref().map_err(|e| e.clone())?.itur_bt2100_pq
@@ -337,10 +345,27 @@ impl crate::Surface for super::Surface {
             render_layer.setDisplaySyncEnabled(display_sync);
         }
 
+        #[cfg(target_os = "macos")]
+        if display_sync && available!(macos = 14.0) && objc2::MainThreadMarker::new().is_some() {
+            // AppKit display properties are read on main; the worker only owns Metal callbacks.
+            let screen: Option<Retained<objc2::runtime::NSObject>> =
+                hosting_window(Retained::into_super(render_layer.clone()))
+                    .and_then(|window| unsafe { objc2::msg_send![&*window, screen] });
+            if let Some(screen) = screen {
+                let hz: isize = unsafe { objc2::msg_send![&*screen, maximumFramesPerSecond] };
+                if hz > 0 {
+                    *self.display_link.lock() =
+                        super::display_link::DisplayLink::new(render_layer.clone(), hz as f32);
+                }
+            }
+        }
+
         Ok(())
     }
 
     unsafe fn unconfigure(&self, _device: &super::Device) {
+        #[cfg(target_os = "macos")]
+        drop(self.display_link.lock().take());
         *self.swapchain_format.write() = None;
     }
 
@@ -370,14 +395,36 @@ impl crate::Surface for super::Surface {
             }
         }
 
-        let (drawable, texture) = match autoreleasepool(|_| {
+        #[cfg(target_os = "macos")]
+        let clock = self
+            .display_link
+            .lock()
+            .as_ref()
+            .map(|clock| clock.receiver.clone());
+        #[cfg(target_os = "macos")]
+        let acquired = if let Some(clock) = clock {
+            clock
+                .take(_timeout.unwrap_or(core::time::Duration::from_secs(1)))
+                .map(|(drawable, _target)| drawable)
+        } else {
+            autoreleasepool(|_| {
+                render_layer
+                    .nextDrawable()
+                    .map(|drawable| drawable.to_owned())
+            })
+        };
+        #[cfg(not(target_os = "macos"))]
+        let acquired = autoreleasepool(|_| {
             render_layer
                 .nextDrawable()
-                .map(|drawable| (drawable.to_owned(), drawable.texture().to_owned()))
-        }) {
+                .map(|drawable| drawable.to_owned())
+        });
+
+        let drawable = match acquired {
             Some(pair) => pair,
             None => return Err(crate::SurfaceError::Timeout),
         };
+        let texture = drawable.texture().to_owned();
 
         let swapchain_format = self.swapchain_format.read().unwrap();
         let extent = self.extent.read();
