@@ -226,6 +226,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
+    "NSNotification",
     "NSRunLoop",
     "NSObjCRuntime",
     "NSThread",
@@ -275,6 +276,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
     "std",
     "objc2-core-foundation",
     "objc2-core-graphics",
+    "CABase",
     "CALayer",
     "CAMetalLayer",
     "CAMetalDisplayLink",

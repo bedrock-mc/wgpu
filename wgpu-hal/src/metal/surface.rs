@@ -346,17 +346,17 @@ impl crate::Surface for super::Surface {
         }
 
         #[cfg(target_os = "macos")]
-        if display_sync && available!(macos = 14.0) && objc2::MainThreadMarker::new().is_some() {
+        if let Some(main) = objc2::MainThreadMarker::new()
+            .filter(|_| display_sync && super::display_link_delivery_supported())
+        {
             // AppKit display properties are read on main; the worker only owns Metal callbacks.
-            let screen: Option<Retained<objc2::runtime::NSObject>> =
-                hosting_window(Retained::into_super(render_layer.clone()))
-                    .and_then(|window| unsafe { objc2::msg_send![&*window, screen] });
-            if let Some(screen) = screen {
-                let hz: isize = unsafe { objc2::msg_send![&*screen, maximumFramesPerSecond] };
-                if hz > 0 {
-                    *self.display_link.lock() =
-                        super::display_link::DisplayLink::new(render_layer.clone(), hz as f32);
-                }
+            if let Some(window) = hosting_window(Retained::into_super(render_layer.clone())) {
+                *self.display_link.lock() = super::display_link::DisplayLink::new(
+                    render_layer.clone(),
+                    &window,
+                    config.maximum_frame_latency,
+                    main,
+                );
             }
         }
 
@@ -403,9 +403,7 @@ impl crate::Surface for super::Surface {
             .map(|clock| clock.receiver.clone());
         #[cfg(target_os = "macos")]
         let acquired = if let Some(clock) = clock {
-            clock
-                .take(_timeout.unwrap_or(core::time::Duration::from_secs(1)))
-                .map(|(drawable, _target)| drawable)
+            clock.take(_timeout.unwrap_or(core::time::Duration::from_secs(1)))
         } else {
             autoreleasepool(|_| {
                 render_layer

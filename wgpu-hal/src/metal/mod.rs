@@ -138,6 +138,12 @@ impl OsFeatures {
     }
 }
 
+/// Whether FIFO surfaces on window-hosted layers configured on the main thread get drawables
+/// from a display link, which holds one prefetched drawable; size `maximum_frame_latency` for it.
+pub fn display_link_delivery_supported() -> bool {
+    cfg!(target_os = "macos") && available!(macos = 14.0)
+}
+
 #[derive(Debug)]
 pub struct Instance {
     flags: wgt::InstanceFlags,
