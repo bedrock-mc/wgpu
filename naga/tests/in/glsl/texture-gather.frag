@@ -12,6 +12,7 @@ layout(set = 0, binding = 6) uniform sampler samp;
 layout(set = 0, binding = 7) uniform samplerShadow sampShadow;
 
 layout(location = 0) in vec2 uv;
+layout(location = 1) flat in ivec2 offset;
 layout(location = 0) out vec4 o;
 
 const int COMPONENT = 2;
@@ -26,5 +27,10 @@ void main() {
     uvec4 g = textureGather(usampler2D(utex2d, samp), uv, 1);
     vec4 h = textureGather(sampler2DShadow(depth2d, sampShadow), uv, 0.5);
     vec4 i = textureGatherOffset(sampler2DArrayShadow(depth2dArray, sampShadow), vec3(uv, 2.0), 0.5, ivec2(-1, 1));
-    o = a + b + c + d + e + f + vec4(g) + h + i;
+    vec4 j = textureGatherOffset(sampler2D(tex2d, samp), uv, offset, COMPONENT);
+    vec4 k = textureGatherOffset(sampler2DArray(tex2dArray, samp), vec3(uv, 1.75), offset);
+    uvec4 l = textureGatherOffset(usampler2D(utex2d, samp), uv, offset);
+    vec4 m = textureGatherOffset(sampler2DShadow(depth2d, sampShadow), uv, 0.5, offset);
+    vec4 n = textureGatherOffset(sampler2DArrayShadow(depth2dArray, sampShadow), vec3(uv, 2.5), 0.5, offset);
+    o = a + b + c + d + e + f + vec4(g) + h + i + j + k + vec4(l) + m + n;
 }

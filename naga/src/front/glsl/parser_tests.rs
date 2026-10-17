@@ -1,4 +1,4 @@
-use alloc::{borrow::ToOwned, vec};
+use alloc::{borrow::ToOwned, vec, vec::Vec};
 
 use pp_rs::token::PreprocessorError;
 
@@ -10,6 +10,46 @@ use super::{
     Frontend, Options, Span,
 };
 use crate::ShaderStage;
+
+/// Check that gather layers round up at half integers before integer conversion.
+#[test]
+fn texture_gather_array_layer_rounding() {
+    let module = Frontend::default()
+        .parse(
+            &Options::from(ShaderStage::Fragment),
+            r#"
+        #version 450
+        layout(binding = 0) uniform texture2DArray image;
+        layout(binding = 1) uniform sampler samp;
+        layout(location = 0) out vec4 color;
+        void main() {
+            color = textureGather(sampler2DArray(image, samp), vec3(0.0, 0.0, 1.75))
+                  + textureGather(sampler2DArray(image, samp), vec3(0.0, 0.0, 1.25))
+                  + textureGather(sampler2DArray(image, samp), vec3(0.0, 0.0, 2.5));
+        }
+        "#,
+        )
+        .unwrap();
+
+    let function = module.functions.iter().next().unwrap().1;
+    let layers: Vec<u32> = function
+        .expressions
+        .iter()
+        .filter_map(|(_, expr)| match *expr {
+            crate::Expression::ImageSample {
+                array_index: Some(layer),
+                ..
+            } => Some(
+                module
+                    .to_ctx()
+                    .get_const_val_from(layer, &function.expressions)
+                    .unwrap(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(layers, [2, 1, 3]);
+}
 
 /// Check that double frexp writes 32-bit scalar and vector exponents.
 #[test]

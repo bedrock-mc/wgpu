@@ -1816,12 +1816,34 @@ impl MacroCall {
                 };
 
                 // The array layer, if any, is the last coordinate component
-                let (coordinate, array_index) = if arrayed {
+                let (mut coordinate, array_index) = if arrayed {
                     let coordinate = ctx.vector_resize(size, args[1], Span::default())?;
                     let mut array_index = ctx.add_expression(
                         Expression::AccessIndex {
                             base: args[1],
                             index: size as u32,
+                        },
+                        Span::default(),
+                    )?;
+                    let half = ctx.add_expression(
+                        Expression::Literal(crate::Literal::F32(0.5)),
+                        Span::default(),
+                    )?;
+                    array_index = ctx.add_expression(
+                        Expression::Binary {
+                            op: BinaryOperator::Add,
+                            left: array_index,
+                            right: half,
+                        },
+                        Span::default(),
+                    )?;
+                    array_index = ctx.add_expression(
+                        Expression::Math {
+                            fun: MathFunction::Floor,
+                            arg: array_index,
+                            arg1: None,
+                            arg2: None,
+                            arg3: None,
                         },
                         Span::default(),
                     )?;
@@ -1833,7 +1855,41 @@ impl MacroCall {
 
                 let mut extra_args = args[2..].iter().copied();
                 let depth_ref = if shadow { extra_args.next() } else { None };
-                let texel_offset = if offset { extra_args.next() } else { None };
+                let mut texel_offset = if offset { extra_args.next() } else { None };
+                if let Some(offset) = texel_offset {
+                    if !ctx.local_expression_kind_tracker.is_const(offset) {
+                        // Gather uses level zero, so normalize the offset by its texel size.
+                        let zero =
+                            ctx.add_expression(Expression::Literal(crate::Literal::I32(0)), meta)?;
+                        let mut dimensions = ctx.add_expression(
+                            Expression::ImageQuery {
+                                image: args[0],
+                                query: ImageQuery::Size { level: Some(zero) },
+                            },
+                            meta,
+                        )?;
+                        ctx.conversion(&mut dimensions, meta, Scalar::F32)?;
+                        let mut offset = offset;
+                        ctx.conversion(&mut offset, meta, Scalar::F32)?;
+                        let normalized_offset = ctx.add_expression(
+                            Expression::Binary {
+                                op: BinaryOperator::Divide,
+                                left: offset,
+                                right: dimensions,
+                            },
+                            meta,
+                        )?;
+                        coordinate = ctx.add_expression(
+                            Expression::Binary {
+                                op: BinaryOperator::Add,
+                                left: coordinate,
+                                right: normalized_offset,
+                            },
+                            meta,
+                        )?;
+                        texel_offset = None;
+                    }
+                }
 
                 // The component to gather must be a constant expression in 0..=3
                 let component = match extra_args.next() {
