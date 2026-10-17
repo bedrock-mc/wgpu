@@ -42,6 +42,15 @@ Bottom level categories:
 
 ## Unreleased
 
+### Bug Fixes
+
+#### naga
+
+- Round GLSL texture gather array layers before converting them to integers.
+- Convert GLSL double `frexp` exponents to the 32-bit output parameter type.
+- Preserve SPIR-V `ModfStruct` and `FrexpStruct` result types when storing whole structs.
+- Support runtime GLSL texture gather offsets by shifting coordinates in texel units.
+
 ### Performance
 
 #### Metal

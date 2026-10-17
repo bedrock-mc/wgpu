@@ -30,6 +30,9 @@ pub mod pipeline_constants;
 #[cfg(any(hlsl_out, glsl_out))]
 mod continue_forward;
 
+#[cfg(any(hlsl_out, msl_out))]
+mod inverse;
+
 pub use nt::TaskDispatchLimits;
 
 /// Names of vector components.

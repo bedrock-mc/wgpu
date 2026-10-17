@@ -827,6 +827,7 @@ pub const RESERVED: &[&str] = &[
     super::writer::COMPARISON_SAMPLER_HEAP_VAR,
     super::writer::SAMPLE_EXTERNAL_TEXTURE_FUNCTION,
     super::writer::ABS_FUNCTION,
+    super::writer::INVERSE_FUNCTION,
     super::writer::DIV_FUNCTION,
     super::writer::MOD_FUNCTION,
     super::writer::NEG_FUNCTION,

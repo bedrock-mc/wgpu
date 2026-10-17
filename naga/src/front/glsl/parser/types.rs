@@ -23,7 +23,29 @@ impl ParsingContext<'_> {
         span: &mut Span,
         ty: &mut Handle<Type>,
     ) -> Result<()> {
-        while self.parse_array_specifier_single(frontend, ctx, span, ty)? {}
+        let mut sizes = Vec::new();
+        while let Some(size) = self.parse_array_specifier_single(frontend, ctx, span)? {
+            sizes.push(size);
+        }
+
+        // `T x[A][B]` is an array of `A` arrays of `B` elements, so the last
+        // specifier gives the innermost array.
+        for size in sizes.into_iter().rev() {
+            frontend.layouter.update(ctx.module.to_ctx()).unwrap();
+            let stride = frontend.layouter[*ty].to_stride();
+            *ty = ctx.module.types.insert(
+                Type {
+                    name: None,
+                    inner: TypeInner::Array {
+                        base: *ty,
+                        size,
+                        stride,
+                    },
+                },
+                *span,
+            );
+        }
+
         Ok(())
     }
 
@@ -33,8 +55,7 @@ impl ParsingContext<'_> {
         frontend: &mut Frontend,
         ctx: &mut Context,
         span: &mut Span,
-        ty: &mut Handle<Type>,
-    ) -> Result<bool> {
+    ) -> Result<Option<ArraySize>> {
         if self.bump_if(frontend, TokenValue::LeftBracket).is_some() {
             let size = if let Some(Token { meta, .. }) =
                 self.bump_if(frontend, TokenValue::RightBracket)
@@ -52,23 +73,9 @@ impl ParsingContext<'_> {
                 ArraySize::Constant(size)
             };
 
-            frontend.layouter.update(ctx.module.to_ctx()).unwrap();
-            let stride = frontend.layouter[*ty].to_stride();
-            *ty = ctx.module.types.insert(
-                Type {
-                    name: None,
-                    inner: TypeInner::Array {
-                        base: *ty,
-                        size,
-                        stride,
-                    },
-                },
-                *span,
-            );
-
-            Ok(true)
+            Ok(Some(size))
         } else {
-            Ok(false)
+            Ok(None)
         }
     }
 

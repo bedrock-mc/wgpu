@@ -11,7 +11,8 @@ use super::{
 use crate::{
     BinaryOperator, DerivativeAxis as Axis, DerivativeControl as Ctrl, Expression, Handle,
     ImageClass, ImageDimension as Dim, ImageQuery, MathFunction, Module, RelationalFunction,
-    SampleLevel, Scalar, ScalarKind as Sk, Span, Type, TypeInner, UnaryOperator, VectorSize,
+    SampleLevel, Scalar, ScalarKind as Sk, Span, SwizzleComponent, Type, TypeInner, UnaryOperator,
+    VectorSize,
 };
 
 impl crate::ScalarKind {
@@ -261,6 +262,51 @@ pub fn inject_builtin(
                         .overloads
                         .push(module.add_builtin(args, builtin));
                 }
+            };
+
+            texture_args_generator(TextureArgsOptions::SHADOW | variations.into(), f)
+        }
+        "textureGather" | "textureGatherOffset" => {
+            // textureGather(gsampler2D[Array]/Cube[Array], P, [int comp])
+            // textureGather(sampler2D[Array]/Cube[Array]Shadow, P, float refZ)
+            // textureGatherOffset(gsampler2D[Array], P, ivec2 offset, [int comp])
+            // textureGatherOffset(sampler2D[Array]Shadow, P, float refZ, ivec2 offset)
+            let offset = name == "textureGatherOffset";
+            let f = |kind, dim, arrayed, multi, shadow| {
+                if multi || !matches!(dim, Dim::D2 | Dim::Cube) || (offset && dim == Dim::Cube) {
+                    return;
+                }
+
+                let class = match shadow {
+                    true => ImageClass::Depth { multi },
+                    false => ImageClass::Sampled { kind, multi },
+                };
+                let image = TypeInner::Image {
+                    dim,
+                    arrayed,
+                    class,
+                };
+                let num_coords = image_dims_to_coords_size(dim) + arrayed as usize;
+
+                let mut args = vec![image, make_coords_arg(num_coords, Sk::Float)];
+                if shadow {
+                    args.push(TypeInner::Scalar(Scalar::F32));
+                }
+                if offset {
+                    args.push(make_coords_arg(2, Sk::Sint));
+                }
+
+                let builtin = MacroCall::TextureGather { offset, shadow };
+                if !shadow {
+                    let mut args = args.clone();
+                    args.push(TypeInner::Scalar(Scalar::I32));
+                    declaration
+                        .overloads
+                        .push(module.add_builtin(args, builtin));
+                }
+                declaration
+                    .overloads
+                    .push(module.add_builtin(args, builtin));
             };
 
             texture_args_generator(TextureArgsOptions::SHADOW | variations.into(), f)
@@ -1392,8 +1438,36 @@ fn inject_common_builtin(
                 declaration.overloads.push(module.add_builtin(args, fun))
             }
         }
-        // TODO: https://github.com/gfx-rs/naga/issues/2526
-        // "modf" | "frexp" => { ... }
+        "modf" | "frexp" => {
+            // bits layout
+            // bit 0 through 1 - dims
+            for bits in 0..0b100 {
+                let size = match bits {
+                    0b00 => None,
+                    0b01 => Some(VectorSize::Bi),
+                    0b10 => Some(VectorSize::Tri),
+                    _ => Some(VectorSize::Quad),
+                };
+                let ty = |scalar| match size {
+                    Some(size) => TypeInner::Vector { size, scalar },
+                    None => TypeInner::Scalar(scalar),
+                };
+
+                let (fun, out_scalar) = match name {
+                    "modf" => (MathFunction::Modf, float_scalar),
+                    "frexp" => (MathFunction::Frexp, Scalar::I32),
+                    _ => unreachable!(),
+                };
+
+                let mut overload = module.add_builtin(
+                    vec![ty(float_scalar), ty(out_scalar)],
+                    MacroCall::MathFunctionWithOut(fun),
+                );
+                overload.parameters_info[1].qualifier = ParameterQualifier::Out;
+
+                declaration.overloads.push(overload)
+            }
+        }
         "cross" => {
             let args = vec![
                 TypeInner::Vector {
@@ -1551,6 +1625,10 @@ pub enum MacroCall {
         shadow: bool,
         level_type: TextureLevelType,
     },
+    TextureGather {
+        offset: bool,
+        shadow: bool,
+    },
     TextureSize {
         arrayed: bool,
     },
@@ -1560,6 +1638,10 @@ pub enum MacroCall {
     },
     ImageStore,
     MathFunction(MathFunction),
+    /// A math function (`Modf` or `Frexp`) whose result is a predeclared
+    /// struct: the first member is returned and the second member is stored
+    /// to the last, `out`, argument.
+    MathFunctionWithOut(MathFunction),
     FindLsbUint,
     FindMsbUint,
     BitfieldExtract,
@@ -1716,6 +1798,136 @@ impl MacroCall {
                 texture_call(ctx, args[0], level, comps, texture_offset, meta)?
             }
 
+            MacroCall::TextureGather { offset, shadow } => {
+                let Some(sampler) = ctx.samplers.get(&args[0]).copied() else {
+                    return Err(Error {
+                        kind: ErrorKind::SemanticError("Bad call".into()),
+                        meta,
+                    });
+                };
+                let (size, arrayed) = match *ctx.resolve_type(args[0], meta)? {
+                    TypeInner::Image {
+                        dim: Dim::Cube,
+                        arrayed,
+                        ..
+                    } => (VectorSize::Tri, arrayed),
+                    TypeInner::Image { arrayed, .. } => (VectorSize::Bi, arrayed),
+                    _ => unreachable!(),
+                };
+
+                // The array layer, if any, is the last coordinate component
+                let (mut coordinate, array_index) = if arrayed {
+                    let coordinate = ctx.vector_resize(size, args[1], Span::default())?;
+                    let mut array_index = ctx.add_expression(
+                        Expression::AccessIndex {
+                            base: args[1],
+                            index: size as u32,
+                        },
+                        Span::default(),
+                    )?;
+                    let half = ctx.add_expression(
+                        Expression::Literal(crate::Literal::F32(0.5)),
+                        Span::default(),
+                    )?;
+                    array_index = ctx.add_expression(
+                        Expression::Binary {
+                            op: BinaryOperator::Add,
+                            left: array_index,
+                            right: half,
+                        },
+                        Span::default(),
+                    )?;
+                    array_index = ctx.add_expression(
+                        Expression::Math {
+                            fun: MathFunction::Floor,
+                            arg: array_index,
+                            arg1: None,
+                            arg2: None,
+                            arg3: None,
+                        },
+                        Span::default(),
+                    )?;
+                    ctx.conversion(&mut array_index, meta, Scalar::I32)?;
+                    (coordinate, Some(array_index))
+                } else {
+                    (args[1], None)
+                };
+
+                let mut extra_args = args[2..].iter().copied();
+                let depth_ref = if shadow { extra_args.next() } else { None };
+                let mut texel_offset = if offset { extra_args.next() } else { None };
+                if let Some(offset) = texel_offset {
+                    if !ctx.local_expression_kind_tracker.is_const(offset) {
+                        // Gather uses level zero, so normalize the offset by its texel size.
+                        let zero =
+                            ctx.add_expression(Expression::Literal(crate::Literal::I32(0)), meta)?;
+                        let mut dimensions = ctx.add_expression(
+                            Expression::ImageQuery {
+                                image: args[0],
+                                query: ImageQuery::Size { level: Some(zero) },
+                            },
+                            meta,
+                        )?;
+                        ctx.conversion(&mut dimensions, meta, Scalar::F32)?;
+                        let mut offset = offset;
+                        ctx.conversion(&mut offset, meta, Scalar::F32)?;
+                        let normalized_offset = ctx.add_expression(
+                            Expression::Binary {
+                                op: BinaryOperator::Divide,
+                                left: offset,
+                                right: dimensions,
+                            },
+                            meta,
+                        )?;
+                        coordinate = ctx.add_expression(
+                            Expression::Binary {
+                                op: BinaryOperator::Add,
+                                left: coordinate,
+                                right: normalized_offset,
+                            },
+                            meta,
+                        )?;
+                        texel_offset = None;
+                    }
+                }
+
+                // The component to gather must be a constant expression in 0..=3
+                let component = match extra_args.next() {
+                    None => SwizzleComponent::X,
+                    Some(comp) => match ctx
+                        .module
+                        .to_ctx()
+                        .get_const_val_from::<u32, _>(comp, &ctx.expressions)
+                    {
+                        Ok(index @ 0..=3) => SwizzleComponent::XYZW[index as usize],
+                        _ => {
+                            return Err(Error {
+                                kind: ErrorKind::SemanticError(
+                                    "textureGather component must be a constant expression in the range [0, 3]"
+                                        .into(),
+                                ),
+                                meta,
+                            })
+                        }
+                    },
+                };
+
+                ctx.add_expression(
+                    Expression::ImageSample {
+                        image: args[0],
+                        sampler,
+                        gather: Some(component),
+                        coordinate,
+                        array_index,
+                        offset: texel_offset,
+                        level: SampleLevel::Zero,
+                        depth_ref,
+                        clamp_to_edge: false,
+                    },
+                    meta,
+                )?
+            }
+
             MacroCall::TextureSize { arrayed } => {
                 let mut expr = ctx.add_expression(
                     Expression::ImageQuery {
@@ -1841,6 +2053,54 @@ impl MacroCall {
                 },
                 Span::default(),
             )?,
+            MacroCall::MathFunctionWithOut(fun) => {
+                let (size, scalar) = match *ctx.resolve_type(args[0], meta)? {
+                    TypeInner::Scalar(scalar) => (None, scalar),
+                    TypeInner::Vector { size, scalar } => (Some(size), scalar),
+                    _ => unreachable!(),
+                };
+                ctx.module.generate_predeclared_type(match fun {
+                    MathFunction::Modf => crate::PredeclaredType::ModfResult { size, scalar },
+                    MathFunction::Frexp => crate::PredeclaredType::FrexpResult { size, scalar },
+                    _ => unreachable!(),
+                });
+
+                let result = ctx.add_expression(
+                    Expression::Math {
+                        fun,
+                        arg: args[0],
+                        arg1: None,
+                        arg2: None,
+                        arg3: None,
+                    },
+                    Span::default(),
+                )?;
+                let mut out_value = ctx.add_expression(
+                    Expression::AccessIndex {
+                        base: result,
+                        index: 1,
+                    },
+                    Span::default(),
+                )?;
+                if fun == MathFunction::Frexp {
+                    ctx.forced_conversion(&mut out_value, meta, Scalar::I32)?;
+                }
+                ctx.emit_restart();
+                ctx.body.push(
+                    crate::Statement::Store {
+                        pointer: args[1],
+                        value: out_value,
+                    },
+                    meta,
+                );
+                ctx.add_expression(
+                    Expression::AccessIndex {
+                        base: result,
+                        index: 0,
+                    },
+                    Span::default(),
+                )?
+            }
             mc @ (MacroCall::FindLsbUint | MacroCall::FindMsbUint) => {
                 let fun = match mc {
                     MacroCall::FindLsbUint => MathFunction::FirstTrailingBit,
@@ -2034,9 +2294,14 @@ impl MacroCall {
                 Span::default(),
             )?,
             MacroCall::Barrier => {
+                // GLSL's `barrier()` synchronizes the invocations of a workgroup and
+                // orders accesses to `shared` variables, like glslang's
+                // `OpControlBarrier(Workgroup, Workgroup, AcquireRelease | WorkgroupMemory)`.
+                // `Barrier::all()` would also request a subgroup barrier, which needs
+                // the `SUBGROUP_BARRIER` capability.
                 ctx.emit_restart();
                 ctx.body.push(
-                    crate::Statement::ControlBarrier(crate::Barrier::all()),
+                    crate::Statement::ControlBarrier(crate::Barrier::WORK_GROUP),
                     meta,
                 );
                 return Ok(None);

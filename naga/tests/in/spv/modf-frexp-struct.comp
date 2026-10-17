@@ -1,0 +1,16 @@
+#version 450
+// glslang lowers `modf(x, out i)`/`frexp(x, out e)` to the ModfStruct and
+// FrexpStruct extended instructions.
+
+layout(set = 0, binding = 0) buffer Data {
+    vec2 x;
+    vec2 whole;
+    float y;
+    int e;
+};
+
+layout(local_size_x = 1) in;
+void main() {
+    x = modf(x, whole);
+    y = frexp(y, e);
+}

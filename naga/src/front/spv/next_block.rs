@@ -891,7 +891,9 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     let result_ty = self.lookup_type.lookup(result_type_id)?;
                     let inner = &ctx.module.types[result_ty.handle].inner;
                     let kind = inner.scalar_kind().unwrap();
-                    let size = inner.size(ctx.gctx()) as u8;
+                    // `As::convert` takes the scalar width, not the byte size of the
+                    // whole (possibly vector) type.
+                    let size = inner.scalar_width().unwrap();
 
                     let left_cast = ctx.expressions.append(
                         crate::Expression::As {
@@ -1808,6 +1810,29 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         None
                     };
 
+                    // `Modf` and `Frexp` evaluate to a predeclared result struct
+                    // (rather than the SPIR-V result type), which must be registered
+                    // in the module's special types.
+                    if let Mf::Modf | Mf::Frexp = fun {
+                        let result_ty = self.lookup_type.lookup(result_type_id)?.handle;
+                        let (size, scalar) = match ctx.module.types[result_ty].inner {
+                            crate::TypeInner::Struct { ref members, .. } => {
+                                match ctx.module.types[members[0].ty].inner {
+                                    crate::TypeInner::Scalar(scalar) => (None, scalar),
+                                    crate::TypeInner::Vector { size, scalar } => {
+                                        (Some(size), scalar)
+                                    }
+                                    _ => return Err(Error::UnsupportedExtInst(inst_id)),
+                                }
+                            }
+                            _ => return Err(Error::UnsupportedExtInst(inst_id)),
+                        };
+                        ctx.module.generate_predeclared_type(match fun {
+                            Mf::Modf => crate::PredeclaredType::ModfResult { size, scalar },
+                            _ => crate::PredeclaredType::FrexpResult { size, scalar },
+                        });
+                    }
+
                     let expr = crate::Expression::Math {
                         fun,
                         arg,
@@ -1815,10 +1840,51 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         arg2,
                         arg3,
                     };
+                    let mut handle = ctx.expressions.append(expr, span);
+                    if let Mf::Modf | Mf::Frexp = fun {
+                        let ty = self.lookup_type.lookup(result_type_id)?.handle;
+                        let first = ctx.expressions.append(
+                            crate::Expression::AccessIndex {
+                                base: handle,
+                                index: 0,
+                            },
+                            span,
+                        );
+                        let mut second = ctx.expressions.append(
+                            crate::Expression::AccessIndex {
+                                base: handle,
+                                index: 1,
+                            },
+                            span,
+                        );
+                        if fun == Mf::Frexp {
+                            let crate::TypeInner::Struct { ref members, .. } =
+                                ctx.module.types[ty].inner
+                            else {
+                                unreachable!();
+                            };
+                            let scalar = ctx.module.types[members[1].ty].inner.scalar().unwrap();
+                            second = ctx.expressions.append(
+                                crate::Expression::As {
+                                    expr: second,
+                                    kind: scalar.kind,
+                                    convert: Some(scalar.width),
+                                },
+                                span,
+                            );
+                        }
+                        handle = ctx.expressions.append(
+                            crate::Expression::Compose {
+                                ty,
+                                components: vec![first, second],
+                            },
+                            span,
+                        );
+                    }
                     self.lookup_expression.insert(
                         result_id,
                         LookupExpression {
-                            handle: ctx.expressions.append(expr, span),
+                            handle,
                             type_id: result_type_id,
                             block_id,
                         },
