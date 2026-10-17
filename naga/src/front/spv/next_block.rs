@@ -1840,10 +1840,51 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         arg2,
                         arg3,
                     };
+                    let mut handle = ctx.expressions.append(expr, span);
+                    if let Mf::Modf | Mf::Frexp = fun {
+                        let ty = self.lookup_type.lookup(result_type_id)?.handle;
+                        let first = ctx.expressions.append(
+                            crate::Expression::AccessIndex {
+                                base: handle,
+                                index: 0,
+                            },
+                            span,
+                        );
+                        let mut second = ctx.expressions.append(
+                            crate::Expression::AccessIndex {
+                                base: handle,
+                                index: 1,
+                            },
+                            span,
+                        );
+                        if fun == Mf::Frexp {
+                            let crate::TypeInner::Struct { ref members, .. } =
+                                ctx.module.types[ty].inner
+                            else {
+                                unreachable!();
+                            };
+                            let scalar = ctx.module.types[members[1].ty].inner.scalar().unwrap();
+                            second = ctx.expressions.append(
+                                crate::Expression::As {
+                                    expr: second,
+                                    kind: scalar.kind,
+                                    convert: Some(scalar.width),
+                                },
+                                span,
+                            );
+                        }
+                        handle = ctx.expressions.append(
+                            crate::Expression::Compose {
+                                ty,
+                                components: vec![first, second],
+                            },
+                            span,
+                        );
+                    }
                     self.lookup_expression.insert(
                         result_id,
                         LookupExpression {
-                            handle: ctx.expressions.append(expr, span),
+                            handle,
                             type_id: result_type_id,
                             block_id,
                         },

@@ -47,6 +47,7 @@ Bottom level categories:
 #### naga
 
 - Convert GLSL double `frexp` exponents to the 32-bit output parameter type.
+- Preserve SPIR-V `ModfStruct` and `FrexpStruct` result types when storing whole structs.
 
 ### Performance
 

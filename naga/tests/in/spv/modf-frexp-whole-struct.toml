@@ -1,0 +1,2 @@
+targets = "WGSL"
+capabilities = "FLOAT64 | SHADER_INT64"

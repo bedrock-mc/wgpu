@@ -1,0 +1,46 @@
+OpCapability Shader
+OpCapability Float64
+%glsl = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %modf32 "Modf32"
+OpName %frexp32 "Frexp32"
+OpName %modf64 "Modf64"
+OpName %frexp64 "Frexp64"
+%void = OpTypeVoid
+%function = OpTypeFunction %void
+%float = OpTypeFloat 32
+%double = OpTypeFloat 64
+%int = OpTypeInt 32 1
+%uint = OpTypeInt 32 0
+%v2float = OpTypeVector %float 2
+%v2double = OpTypeVector %double 2
+%v2uint = OpTypeVector %uint 2
+%modf32 = OpTypeStruct %float %float
+%frexp32 = OpTypeStruct %float %int
+%modf64 = OpTypeStruct %v2double %v2double
+%frexp64 = OpTypeStruct %v2double %v2uint
+%ptr_modf32 = OpTypePointer Function %modf32
+%ptr_frexp32 = OpTypePointer Function %frexp32
+%ptr_modf64 = OpTypePointer Function %modf64
+%ptr_frexp64 = OpTypePointer Function %frexp64
+%one32 = OpConstant %float 1.75
+%one64 = OpConstant %double 1.75
+%two64 = OpConstantComposite %v2double %one64 %one64
+%main = OpFunction %void None %function
+%entry = OpLabel
+%local_modf32 = OpVariable %ptr_modf32 Function
+%local_frexp32 = OpVariable %ptr_frexp32 Function
+%local_modf64 = OpVariable %ptr_modf64 Function
+%local_frexp64 = OpVariable %ptr_frexp64 Function
+%result_modf32 = OpExtInst %modf32 %glsl ModfStruct %one32
+OpStore %local_modf32 %result_modf32
+%result_frexp32 = OpExtInst %frexp32 %glsl FrexpStruct %one32
+OpStore %local_frexp32 %result_frexp32
+%result_modf64 = OpExtInst %modf64 %glsl ModfStruct %two64
+OpStore %local_modf64 %result_modf64
+%result_frexp64 = OpExtInst %frexp64 %glsl FrexpStruct %two64
+OpStore %local_frexp64 %result_frexp64
+OpReturn
+OpFunctionEnd
