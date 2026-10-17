@@ -33,8 +33,8 @@ unsafe impl Sync for Shared {}
 
 impl Shared {
     /// Waits only for bounded rendering/copy work, never for a free display drawable.
-    pub(super) fn acquire(self: &Arc<Self>, timeout: Duration) -> Option<Frame> {
-        let until = Instant::now() + timeout;
+    pub(super) fn acquire(self: &Arc<Self>, timeout: Option<Duration>) -> Option<Frame> {
+        let until = timeout.map(|timeout| Instant::now() + timeout);
         let mut pool = self.pool.lock();
         loop {
             if let Some(key) = pool.acquire() {
@@ -44,12 +44,26 @@ impl Shared {
                     submitted: false,
                 });
             }
-            let remaining = until.saturating_duration_since(Instant::now());
-            if pool.stopped || remaining.is_zero() {
+            let remaining = until.map(|until| until.saturating_duration_since(Instant::now()));
+            if pool.stopped || remaining.is_some_and(|remaining| remaining.is_zero()) {
                 return None;
             }
-            self.available.wait_for(&mut pool, remaining);
+            match remaining {
+                Some(remaining) => {
+                    self.available.wait_for(&mut pool, remaining);
+                }
+                None => self.available.wait(&mut pool),
+            }
         }
+    }
+
+    /// Sleeps until an image is ready before asking the display link for a drawable.
+    fn wait_for_image(&self) -> bool {
+        let mut pool = self.pool.lock();
+        while !pool.has_ready() && !pool.stopped {
+            self.available.wait(&mut pool);
+        }
+        !pool.stopped
     }
 
     /// Returns an image only after the presenter has finished reading it.
@@ -182,9 +196,9 @@ fn run(shared: Arc<Shared>, receiver: Arc<super::display_link::Receiver>, queue:
     autoreleasepool(|_| {
         NSThread::currentThread().setQualityOfService(NSQualityOfService::UserInteractive);
     });
-    while !shared.pool.lock().stopped {
+    while shared.wait_for_image() {
         autoreleasepool(|_| {
-            let Some(drawable) = receiver.take(Duration::from_millis(50)) else {
+            let Some(drawable) = receiver.take(None) else {
                 return;
             };
             let Some(key) = shared.pool.lock().take() else {

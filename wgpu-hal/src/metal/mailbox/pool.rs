@@ -82,6 +82,11 @@ impl Pool {
         self.slots[key.index] = Slot::Ready(key.serial);
     }
 
+    /// Whether presentation has a completed image to display.
+    pub fn has_ready(&self) -> bool {
+        self.ready.is_some()
+    }
+
     /// Reserves the latest completed image until its presentation copy completes.
     pub fn take(&mut self) -> Option<Key> {
         let key = self.ready.take()?;
@@ -109,6 +114,27 @@ impl Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_needs_a_completed_image_and_becomes_idle_after_take() {
+        let mut pool = Pool::default();
+        assert!(!pool.has_ready());
+        let key = pool.acquire().unwrap();
+        assert!(!pool.has_ready());
+        pool.submit(key);
+        assert!(!pool.has_ready());
+        pool.complete(key, true);
+        assert!(pool.has_ready());
+        assert_eq!(pool.take(), Some(key));
+        assert!(!pool.has_ready());
+        pool.release(key);
+        let key = pool.acquire().unwrap();
+        pool.submit(key);
+        pool.complete(key, true);
+        assert!(pool.has_ready());
+        pool.stop();
+        assert!(!pool.has_ready());
+    }
 
     #[test]
     fn newest_completed_image_wins_without_reusing_pending_or_reading_images() {

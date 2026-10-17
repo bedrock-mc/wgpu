@@ -629,7 +629,7 @@ struct Relay {
 pub struct QueueShared {
     raw: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     // Tracks command buffers created via `CommandEncoder::begin_encoding` that
-    // have not yet been submitted or discarded. Used to proactively fail
+    // have not been committed, including skipped empty buffers. Used to proactively fail
     // before hitting Metal's `maxCommandBufferCount`.
     //
     // (In a few places we call `.commandBuffer{,WithUnretainedReferences}` directly
@@ -808,9 +808,8 @@ impl crate::Queue for Queue {
                 if cmd_buffer.has_commands || index + 1 == command_buffers.len() {
                     cmd_buffer.raw.commit();
                 } else {
-                    cmd_buffer
-                        .discarded_empty
-                        .store(true, atomic::Ordering::Release);
+                    // Skipped buffers still occupy a native allocation slot until dropped.
+                    continue;
                 }
                 // One command buffer per `end_encoding` call moves from the
                 // "created but not yet submitted" bucket into the submitted
@@ -1411,7 +1410,6 @@ unsafe impl Sync for CommandEncoder {}
 #[derive(Debug)]
 pub struct CommandBuffer {
     has_commands: bool,
-    discarded_empty: atomic::AtomicBool,
     raw: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     queue_shared: Arc<QueueShared>,
 }

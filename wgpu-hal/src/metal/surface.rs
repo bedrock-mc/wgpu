@@ -446,7 +446,7 @@ impl crate::Surface for super::Surface {
             .map(|mailbox| mailbox.shared.clone())
         {
             let frame = shared
-                .acquire(_timeout.unwrap_or(core::time::Duration::from_secs(1)))
+                .acquire(_timeout)
                 .ok_or(crate::SurfaceError::Timeout)?;
             return Ok(self.acquired(
                 frame.texture().clone(),
@@ -462,7 +462,7 @@ impl crate::Surface for super::Surface {
             .map(|clock| clock.receiver.clone());
         #[cfg(target_os = "macos")]
         let acquired = if let Some(clock) = clock {
-            clock.take(_timeout.unwrap_or(core::time::Duration::from_secs(1)))
+            clock.take(_timeout)
         } else {
             autoreleasepool(|_| {
                 render_layer

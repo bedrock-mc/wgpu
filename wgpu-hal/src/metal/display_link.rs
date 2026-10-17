@@ -21,7 +21,7 @@ use objc2_quartz_core::{
     CACurrentMediaTime, CAFrameRateRange, CAMetalDisplayLink, CAMetalDisplayLinkDelegate,
     CAMetalDisplayLinkUpdate, CAMetalDrawable, CAMetalLayer,
 };
-use parking_lot::{Condvar, Mutex, MutexGuard};
+use parking_lot::{Condvar, Mutex};
 use queue::{Frame, Inbox};
 use std::{thread::JoinHandle, time::Instant};
 
@@ -85,6 +85,7 @@ fn screen_rate(window: &NSObject, _main: MainThreadMarker) -> Option<f32> {
 pub(super) struct Receiver {
     inbox: Mutex<Inbox<Drawable>>,
     ready: Condvar,
+    requested: Condvar,
     wake: Mutex<Option<Wake>>,
     rate: RateRequest,
 }
@@ -92,24 +93,39 @@ pub(super) struct Receiver {
 impl Receiver {
     /// Waits for a display update whose submission deadline has not passed, releasing the lock
     /// while callbacks publish.
-    pub fn take(&self, timeout: Duration) -> Option<Retained<ProtocolObject<dyn CAMetalDrawable>>> {
-        let until = Instant::now() + timeout;
+    pub fn take(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Option<Retained<ProtocolObject<dyn CAMetalDrawable>>> {
+        let until = timeout.map(|timeout| Instant::now() + timeout);
         let mut inbox = self.inbox.lock();
         loop {
             match inbox.take(CACurrentMediaTime()) {
                 Some(Ok(drawable)) => return Some(drawable.0),
                 Some(Err(expired)) => {
-                    MutexGuard::unlocked(&mut inbox, || drop(expired));
+                    drop(inbox);
+                    drop(expired);
+                    inbox = self.inbox.lock();
                     continue;
                 }
                 None if inbox.is_stopped() => return None,
                 None => {}
             }
-            let remaining = until.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            let remaining = until.map(|until| until.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                inbox.cancel_request();
+                drop(inbox);
+                self.wake_worker();
                 return None;
             }
-            self.ready.wait_for(&mut inbox, remaining);
+            inbox.request();
+            self.requested.notify_one();
+            match remaining {
+                Some(remaining) => {
+                    self.ready.wait_for(&mut inbox, remaining);
+                }
+                None => self.ready.wait(&mut inbox),
+            }
         }
     }
 
@@ -117,7 +133,13 @@ impl Receiver {
     fn stop(&self) {
         let discarded = self.inbox.lock().stop();
         self.ready.notify_all();
+        self.requested.notify_one();
         drop(discarded);
+        self.wake_worker();
+    }
+
+    /// Interrupts the run loop after timeout or cancellation; native link changes stay on its worker.
+    fn wake_worker(&self) {
         if let Some(wake) = &*self.wake.lock() {
             wake.0.stop();
             wake.0.wake_up();
@@ -136,13 +158,11 @@ define_class!(
         #[unsafe(method(metalDisplayLink:needsUpdate:))]
         fn display_update(&self, link: &CAMetalDisplayLink, update: &CAMetalDisplayLinkUpdate) {
             let receiver = self.ivars();
-            if let Some(hz) = receiver.rate.take() {
-                link.setPreferredFrameRateRange(exact_range(hz));
-            }
             let discarded = receiver.inbox.lock().publish(Frame {
                 drawable: Drawable(update.drawable()),
                 deadline: update.targetTimestamp(),
             });
+            link.setPaused(true);
             receiver.ready.notify_one();
             drop(discarded);
         }
@@ -150,6 +170,7 @@ define_class!(
 );
 
 impl Target {
+    /// Creates the delegate that delivers requested updates to the receiver.
     fn new(receiver: Arc<Receiver>) -> Retained<Self> {
         let object = Self::alloc().set_ivars(receiver);
         // SAFETY: NSObject initialization accepts the initialized delegate allocation.
@@ -286,6 +307,7 @@ fn run(layer: Layer, receiver: Arc<Receiver>, latency: f32) {
     let link = CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), &layer.0);
     link.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     link.setPreferredFrameLatency(latency);
+    link.setPaused(true);
     if let Some(hz) = receiver.rate.take() {
         link.setPreferredFrameRateRange(exact_range(hz));
     }
@@ -294,13 +316,26 @@ fn run(layer: Layer, receiver: Arc<Receiver>, latency: f32) {
     unsafe {
         link.addToRunLoop_forMode(&NSRunLoop::currentRunLoop(), NSRunLoopCommonModes);
     }
-    while !receiver.inbox.lock().is_stopped() {
+    loop {
+        let mut inbox = receiver.inbox.lock();
+        while !inbox.needs_update() && !inbox.is_stopped() {
+            receiver.requested.wait(&mut inbox);
+        }
+        if inbox.is_stopped() {
+            break;
+        }
+        drop(inbox);
+        if let Some(hz) = receiver.rate.take() {
+            link.setPreferredFrameRateRange(exact_range(hz));
+        }
+        link.setPaused(false);
         autoreleasepool(|_| {
             // SAFETY: the constant is supplied by Core Foundation; the worker runs its own loop.
             unsafe {
                 CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, 0.1, true);
             }
         });
+        link.setPaused(true);
     }
     link.invalidate();
     link.setDelegate(None);
@@ -319,6 +354,28 @@ impl Drop for DisplayLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indefinite_acquisition_waits_until_stopped() {
+        let receiver = Receiver::default();
+        std::thread::scope(|scope| {
+            let acquisition = scope.spawn(|| receiver.take(None).is_none());
+            let mut inbox = receiver.inbox.lock();
+            while !inbox.needs_update() {
+                receiver.requested.wait(&mut inbox);
+            }
+            drop(inbox);
+            receiver.stop();
+            assert!(acquisition.join().unwrap());
+        });
+    }
+
+    #[test]
+    fn zero_timeout_leaves_the_receiver_idle() {
+        let receiver = Receiver::default();
+        assert!(receiver.take(Some(Duration::ZERO)).is_none());
+        assert!(!receiver.inbox.lock().needs_update());
+    }
 
     #[test]
     fn screen_rates_apply_once_and_the_latest_change_wins() {
