@@ -2019,13 +2019,16 @@ impl MacroCall {
                     },
                     Span::default(),
                 )?;
-                let out_value = ctx.add_expression(
+                let mut out_value = ctx.add_expression(
                     Expression::AccessIndex {
                         base: result,
                         index: 1,
                     },
                     Span::default(),
                 )?;
+                if fun == MathFunction::Frexp {
+                    ctx.forced_conversion(&mut out_value, meta, Scalar::I32)?;
+                }
                 ctx.emit_restart();
                 ctx.body.push(
                     crate::Statement::Store {

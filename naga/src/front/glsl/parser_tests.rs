@@ -11,6 +11,38 @@ use super::{
 };
 use crate::ShaderStage;
 
+/// Check that double frexp writes 32-bit scalar and vector exponents.
+#[test]
+fn frexp_double_exponents() {
+    let module = Frontend::default()
+        .parse(
+            &Options::from(ShaderStage::Compute),
+            r#"
+        #version 450
+        layout(local_size_x = 1) in;
+        layout(binding = 0) buffer Data { dvec4 value; ivec4 exponent; };
+        void main() {
+            int e;
+            double f = frexp(value.x, e);
+            ivec2 e2;
+            dvec2 f2 = frexp(value.xy, e2);
+            ivec3 e3;
+            dvec3 f3 = frexp(value.xyz, e3);
+            value = frexp(value, exponent);
+            value += dvec4(f, f2.x, f3.x, double(e + e2.x + e3.x));
+        }
+        "#,
+        )
+        .unwrap();
+
+    crate::valid::Validator::new(
+        crate::valid::ValidationFlags::all(),
+        crate::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
 #[cfg(test)]
 use std::println;
 

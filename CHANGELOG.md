@@ -42,6 +42,12 @@ Bottom level categories:
 
 ## Unreleased
 
+### Bug Fixes
+
+#### naga
+
+- Convert GLSL double `frexp` exponents to the 32-bit output parameter type.
+
 ### Performance
 
 #### Metal
