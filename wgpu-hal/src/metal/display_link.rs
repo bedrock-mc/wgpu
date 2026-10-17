@@ -163,6 +163,7 @@ define_class!(
                 deadline: update.targetTimestamp(),
             });
             link.setPaused(true);
+            receiver.wake_worker();
             receiver.ready.notify_one();
             drop(discarded);
         }
